@@ -6,19 +6,37 @@
 
 - 已连续完成多轮 `provider` parser 兼容性修复
 - 已新增 GitLab API contract store，可通过 token/API 写远端 contracts
-- 当前本地测试总数为 `30`，全部通过
+- Phase 1 已完成第一轮文档文案与 `capabilityTerms` 去噪收口
+- Phase 2 已完成第一轮请求结构语义收口
+- Phase 3 已完成第一轮响应结构语义收口
+- Phase 4 已完成第一轮语义准确性收口
+- Phase 5 已完成第一轮 parser 兼容性与类型源码回溯收口
+- Phase 6 已完成第一轮环境证据收集，但真实 API/SSH 回放仍未完全闭环
+- 当前本地测试总数为 `45`，全部通过
 - `provider.py` 的方法发现、接口继承链解析、参数注解提取、数组/varargs 类型处理已明显增强
 - 已完成：
   - token/API 写远端替代 Git SSH
+  - Phase 1：编号型注释清洗、fallback 文案改写、低价值 capability terms 过滤
+  - Phase 2：legacy query object、multipart/file input、dynamic body 与最小校验语义展示
+  - Phase 3：response wrapper、分页包装、树结构与继承空壳响应展示
+  - Phase 4：字段注解说明、嵌套类型递归、`BusinessException` 错误提取
+  - Phase 5：package-private 签名、fully-qualified mapping discovery、本地 `record` 类型源码解析
+  - Phase 6：TLS 诊断复跑、SSH 通道确认、环境证据归档
 - 已验证：
   - 默认 Git SSH 模式可真实写回远端 contracts
 - 当前外部阻塞：
   - 当前机器到 `gitlab.dstcar.com` HTTPS API 的 TLS 握手在 `ClientHello` 后被对端中断，导致 `gitlab_api` 模式尚未完成真实回放
 - 当前远端状态：
   - `dmp/ai-coding/dst-api-skills-repo` 的 `main` 已清空，适合重新做联调测试
-- 还未开始做：
-  - capabilityTerms 质量优化
-  - 真实 provider 仓库回放验证
+- 当前优化规划状态：
+  - 已完成待优化问题排查与分阶段路线拆分
+  - 已写完 Phase 1 ~ Phase 6 的设计/实施计划文档
+  - 已完成 Phase 1
+  - 已完成 Phase 2
+  - 已完成 Phase 3
+  - 已完成 Phase 4
+  - 已完成 Phase 5
+  - Phase 6 已部分完成
 
 ## 已完成的关键改动
 
@@ -85,7 +103,7 @@
 
 当前结果：
 
-- `Ran 30 tests`
+- `Ran 45 tests`
 - `OK`
 
 ### 真实联调验证
@@ -97,6 +115,7 @@
 未完成：
 
 - `gitlab_api` 模式真实远端回放
+- 代表性 provider 仓库 SSH bounded replay
 
 当前已确认的真实外部错误：
 
@@ -109,8 +128,9 @@
 当前链路判断：
 
 - DNS 可解析到 `198.18.0.13`
-- TCP `443` 可连接
+- ICMP 可达，TCP `443` 可连接
 - 失败点在服务端 TLS 握手早期，不是本仓库 Python 代码、token 或 API 路径问题
+- SSH 通道可用，不属于 GitLab 账号或 SSH 密钥阻塞
 
 ## 当前仍未落实的优化点
 
@@ -122,16 +142,38 @@
 
 ### P1
 
-- 优化 `capabilityTerms`
-  - 增加噪声过滤
-  - 提升业务实体词权重
-  - 调整 service 路由词聚合策略
+- Phase 1 已完成：
+  - 注释编号前缀、`YApi`/URL 元信息去噪
+  - fallback summary / description / response description 改写
+  - aliases / tags / path tokens 的纯数字与模板词过滤
+- Phase 2 已完成：
+  - legacy query object 独立请求区块展示
+  - `MultipartFile` 从普通 `queryParams` 切换到 `fileParts`
+  - 动态 body 的非固定 schema 描述
+  - `defaultValue` / 常见方法参数校验注解说明保留
+- Phase 3 已完成：
+  - raw / wildcard / object-like `Response` 的最小差异化描述
+  - `PageDTO` / `Page` / `IPage` 外层 schema 保留
+  - `Tree<T>` 结构化响应展示
+  - 继承空壳响应类型的“继承自 X”标注
+- Phase 4 已完成：
+  - 字段注解说明提取与“未提供说明”占位区分
+  - 嵌套引用类型递归展开
+  - controller 方法体里的最小 `BusinessException` 错误提取
+- Phase 5 已完成：
+  - package-private controller 方法签名支持
+  - fully-qualified Spring mapping 注解发现
+  - 本地 `record` 类型源码定位与 schema 解析
+- 下一步：
+  - 先协调 TLS/HTTPS API 问题，再补 provider SSH bounded replay
 
 ### P2
 
 - 做真实 provider 仓库回放
+  - `dst-user-core-service`
   - `dst-goods-server`
   - `dst-account-server`
+  - 当前阻塞：本机未发现上述仓库本地副本或明确可访问路径
 
 ### P3
 
@@ -139,6 +181,41 @@
   - `goods / outer / innerapi`
   - 同名类型语义判定
   - source jar / binary jar / 本地源码优先级
+
+## 优化计划文档现状
+
+已新增并可直接续接的计划文档：
+
+- `docs/plans/2026-03-18-api-contract-optimization-roadmap.md`
+- `docs/plans/2026-03-18-doc-quality-index-terms-phase1-design.md`
+- `docs/plans/2026-03-18-doc-quality-index-terms-phase1.md`
+- `docs/plans/2026-03-18-request-structure-phase2.md`
+- `docs/plans/2026-03-18-response-structure-phase3.md`
+- `docs/plans/2026-03-18-semantic-accuracy-phase4.md`
+- `docs/plans/2026-03-18-parser-compat-and-type-source-phase5.md`
+- `docs/plans/2026-03-18-environment-and-real-replay-phase6.md`
+
+当前推荐执行顺序：
+
+1. Phase 1: 文档可读性与索引词质量
+2. Phase 2: 请求结构展示与输入语义
+3. Phase 3: 响应结构展示与包装类型
+4. Phase 4: 语义准确性与文档事实完整度
+5. Phase 5: parser 兼容性与类型源码回溯
+6. Phase 6: 环境与真实回放验证
+
+Phase 6 当前范围：
+
+- `P0` GitLab API TLS/HTTPS 阻塞
+- `P5` 真实 provider 仓库回放
+- `P6` token/API 权限边界与分支策略
+
+执行规则：
+
+- 每解决一个问题，必须同步更新：
+  - `docs/API_CONTRACT_SKILL_待优化清单.md`
+  - 对应 phase 计划文档
+  - 若范围变化，再更新 roadmap / handoff
 
 ## 当前仓库事实与外部文档分叉
 
@@ -163,7 +240,8 @@
 ```text
 继续 API Contract Client Workflow。
 先读取 memory/project-context-handoff.md。
-当前 parser 兼容修复已完成，GitLab API contract store 也已落地，并且 30 条测试全绿。
-SSH 模式真实回放已成功，但当前机器访问 GitLab HTTPS API 仍卡在 TLS 握手。
-远端 main 现在是空仓库，下一步先决定排 TLS 问题还是继续用 SSH 做真实样本回放。
+当前 parser 兼容修复已完成，GitLab API contract store 也已落地，并且 45 条测试全绿。
+Phase 1 到 Phase 5 已完成，Phase 6 已补充 TLS/SSH 环境证据，但真实 API/SSH 回放还未完全闭环。
+下一步优先协调 TLS/HTTPS API 问题，并准备 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 的本地副本后继续回放。
+每解决一个问题，同步更新待优化清单、对应计划文档和 handoff。
 ```

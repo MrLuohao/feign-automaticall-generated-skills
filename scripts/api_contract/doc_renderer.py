@@ -102,12 +102,16 @@ def _render_request(method) -> list[str]:
         ("headers", method.request.headers),
         ("pathParams", method.request.path_params),
         ("queryParams", method.request.query_params),
+        ("queryObjects", method.request.query_objects),
         ("parts", method.request.parts),
     ):
         if not items:
             continue
         rendered_any = True
-        lines.append(f"#### {label}")
+        section_label = label
+        if label == "parts" and any(item.type.startswith("MultipartFile") for item in items):
+            section_label = "fileParts"
+        lines.append(f"#### {section_label}")
         lines.append("")
         lines.append("| 字段名 | 类型 | 必填 | 说明 |")
         lines.append("|------|------|------|------|")

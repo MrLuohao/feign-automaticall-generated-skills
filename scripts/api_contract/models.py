@@ -107,6 +107,7 @@ class RequestModel:
     headers: list[ParamModel] = field(default_factory=list)
     path_params: list[ParamModel] = field(default_factory=list)
     query_params: list[ParamModel] = field(default_factory=list)
+    query_objects: list[ParamModel] = field(default_factory=list)
     parts: list[ParamModel] = field(default_factory=list)
     body: RequestBodyModel = field(default_factory=lambda: RequestBodyModel(type=None))
 

@@ -120,13 +120,24 @@ export API_CONTRACT_GITLAB_START_BRANCH=main
 - `GitLabApiContractStore` 已实现
 - `build_contract_store()` 已支持 `API_CONTRACT_SOURCE=gitlab_api`
 - 默认 Git SSH 模式已完成最小真实回放
-- 当前测试总数为 `30`，文档记录为全量通过
+- Phase 1 已完成第一轮文档文案与 `capabilityTerms` 去噪收口
+- Phase 2 已完成第一轮请求结构语义收口
+- Phase 3 已完成第一轮响应结构语义收口
+- Phase 4 已完成第一轮语义准确性收口
+- Phase 5 已完成第一轮 parser 兼容性与类型源码回溯收口
+- Phase 6 已完成第一轮环境证据收集
+- 当前测试总数为 `45`，全量通过
 
 ### 待优化 / 待验证
 
 - `gitlab_api` 模式真实远端回放仍未完成
 - 当前机器访问 `https://gitlab.dstcar.com/api/v4/...` 时，TLS 握手在 `ClientHello` 后被对端中断
-- `capabilityTerms` 路由质量仍需优化
+- `capabilityTerms` 路由质量仍需继续做更深一轮优化
+- 请求结构语义仍可继续扩展到更多历史接口样本与复杂校验分组
+- 响应结构语义仍可继续扩展到更多包装协议和真实业务返回样本
+- 字段语义、嵌套展开和错误提取仍可继续扩展到更复杂的 service hop 与外部枚举解析
+- parser 兼容性与类型源码回溯仍可继续扩展到更多老式声明和复杂多模块样本
+- HTTPS/TLS 阻塞、provider 仓库实回放、token/branch 真实验证仍待外部条件补齐
 - 真实 provider 样本回放仍需继续扩大
 - 跨模块类型源码回溯仍有收口空间
 

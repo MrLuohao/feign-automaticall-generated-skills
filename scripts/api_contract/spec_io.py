@@ -98,6 +98,7 @@ def _load_method(item: dict) -> MethodModel:
             headers=_load_params(request.get("headers")),
             path_params=_load_params(request.get("pathParams")),
             query_params=_load_params(request.get("queryParams")),
+            query_objects=_load_params(request.get("queryObjects")),
             parts=_load_params(request.get("parts")),
             body=RequestBodyModel(
                 type=body.get("type"),
@@ -182,6 +183,7 @@ def _dump_method(method: MethodModel) -> dict:
             "headers": _dump_params(method.request.headers),
             "pathParams": _dump_params(method.request.path_params),
             "queryParams": _dump_params(method.request.query_params),
+            "queryObjects": _dump_params(method.request.query_objects),
             "parts": _dump_params(method.request.parts),
             "body": {
                 "type": method.request.body.type,

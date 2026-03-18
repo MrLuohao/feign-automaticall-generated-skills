@@ -33,6 +33,7 @@ from api_contract.provider import (
 )
 from api_contract import provider as provider_module
 from api_contract.search import _resolve_ambiguous, search_operation
+from api_contract.spec_io import load_spec_text
 
 
 class MemoryContractStore(ContractStore):
@@ -546,6 +547,205 @@ class GitHubSourceWorkflowTest(unittest.TestCase):
             self.assertNotIn("</p>", spec_text)
             self.assertNotIn("<p>", spec_text)
 
+    def test_provider_sync_strips_numeric_prefix_from_summary_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/RoleController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import org.springframework.web.bind.annotation.GetMapping;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RestController;
+
+                @RestController
+                @RequestMapping("/role")
+                public class RoleController {
+
+                    /**
+                     * 0501 查询当前用户的角色下拉列表
+                     * YApi: http://example.test/project/1/interface/api/1
+                     */
+                    @GetMapping("/current/list")
+                    public Response<String> currentRoleList() {
+                        return null;
+                    }
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.RoleController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec = load_spec_text(
+                store.files["services/demo-service/controllers/RoleController/RoleController.spec.yaml"]
+            )
+            doc_text = store.files["services/demo-service/controllers/RoleController/RoleController.doc.md"]
+
+            self.assertEqual("查询当前用户的角色下拉列表", spec.methods[0].semantic.summary)
+            self.assertIn("查询当前用户的角色下拉列表", doc_text)
+            self.assertNotIn("0501 查询当前用户的角色下拉列表", doc_text)
+            self.assertNotIn("YApi:", doc_text)
+
+    def test_provider_sync_rewrites_low_quality_description_fallback_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/FddCallBackController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import org.springframework.web.bind.annotation.PostMapping;
+                import org.springframework.web.bind.annotation.RequestBody;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RestController;
+
+                @RestController
+                @RequestMapping("/fdd")
+                public class FddCallBackController {
+
+                    @PostMapping("/notify")
+                    public Response<CallBackResult> callBack(@RequestBody CallBackRequest request) {
+                        return null;
+                    }
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/CallBackRequest.java",
+                """
+                package com.example.controller;
+
+                public class CallBackRequest {
+                    private String ticket;
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/CallBackResult.java",
+                """
+                package com.example.controller;
+
+                public class CallBackResult {
+                    private boolean success;
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.FddCallBackController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec = load_spec_text(
+                store.files[
+                    "services/demo-service/controllers/FddCallBackController/FddCallBackController.spec.yaml"
+                ]
+            )
+            method = spec.methods[0]
+
+            self.assertNotIn("处理", method.semantic.summary)
+            self.assertNotIn("CallBack", method.semantic.summary)
+            self.assertNotIn("并返回结果", method.semantic.description)
+            self.assertNotIn("CallBack", method.semantic.description)
+            self.assertNotIn("返回结果", method.response.description)
+            self.assertNotIn("CallBack", method.response.description)
+
+    def test_provider_sync_filters_low_value_capability_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/UserLoginOpenApiBaseController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import org.springframework.web.bind.annotation.PostMapping;
+                import org.springframework.web.bind.annotation.RequestBody;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RestController;
+
+                @RestController
+                @RequestMapping("/openapi/login")
+                public class UserLoginOpenApiBaseController {
+
+                    /**
+                     * 0000发送登录/注册短信
+                     */
+                    @PostMapping("/0602/send")
+                    public Response<LoginSmsResult> sendSms(@RequestBody LoginSmsRequest request) {
+                        return null;
+                    }
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/LoginSmsRequest.java",
+                """
+                package com.example.controller;
+
+                public class LoginSmsRequest {
+                    private String mobile;
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/LoginSmsResult.java",
+                """
+                package com.example.controller;
+
+                public class LoginSmsResult {
+                    private boolean success;
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.UserLoginOpenApiBaseController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            global_index = load_global_index(store.files["indexes/global.index.json"])
+            capability_terms = global_index.services[0].capability.capability_terms
+
+            self.assertIn("登录", capability_terms)
+            self.assertIn("短信", capability_terms)
+            self.assertNotIn("0000", capability_terms)
+            self.assertNotIn("0602", capability_terms)
+            self.assertNotIn("处理", capability_terms)
+
     def test_provider_sync_includes_unannotated_complex_parameter_in_request_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -601,6 +801,292 @@ class GitHubSourceWorkflowTest(unittest.TestCase):
             self.assertIn("#### Request Types", doc_text)
             self.assertIn("#### PermissionDTO", doc_text)
             self.assertIn("- 标量类型：`Boolean`", doc_text)
+
+    def test_provider_sync_renders_legacy_query_object_request_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/RoleController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import org.springframework.web.bind.annotation.GetMapping;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RestController;
+
+                @RestController
+                @RequestMapping("/role")
+                public class RoleController {
+
+                    @GetMapping("/export")
+                    public Response<String> roleExport(RoleQuery query) {
+                        return null;
+                    }
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/RoleQuery.java",
+                """
+                package com.example.controller;
+
+                public class RoleQuery {
+                    private String corpName;
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.RoleController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec = load_spec_text(
+                store.files["services/demo-service/controllers/RoleController/RoleController.spec.yaml"]
+            )
+            doc_text = store.files["services/demo-service/controllers/RoleController/RoleController.doc.md"]
+
+            self.assertIn("RoleQuery", [item.name for item in spec.methods[0].schemas.request_types])
+            self.assertIn("#### queryObjects", doc_text)
+            self.assertIn("| query | `RoleQuery` | 否 | 按 query object 参与请求 |", doc_text)
+            self.assertNotIn("- 无请求参数", doc_text)
+
+    def test_provider_sync_renders_multipart_file_inputs_as_file_parts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/UserJobController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import org.springframework.web.bind.annotation.PostMapping;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RequestParam;
+                import org.springframework.web.bind.annotation.RestController;
+                import org.springframework.web.multipart.MultipartFile;
+
+                @RestController
+                @RequestMapping("/user-job")
+                public class UserJobController {
+
+                    @PostMapping("/import")
+                    public Response<String> importOrgType(
+                        @RequestParam("file") MultipartFile file,
+                        @RequestParam("departmentId") String departmentId
+                    ) {
+                        return null;
+                    }
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.UserJobController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec = load_spec_text(
+                store.files["services/demo-service/controllers/UserJobController/UserJobController.spec.yaml"]
+            )
+            doc_text = store.files["services/demo-service/controllers/UserJobController/UserJobController.doc.md"]
+
+            self.assertEqual(["departmentId"], [item.name for item in spec.methods[0].request.query_params])
+            self.assertEqual(["file"], [item.name for item in spec.methods[0].request.parts])
+            self.assertIn("#### fileParts", doc_text)
+            self.assertIn("| file | `MultipartFile` | 是 | 文件上传字段 |", doc_text)
+            self.assertIn("| departmentId | `String` | 是 | 无 |", doc_text)
+
+    def test_provider_sync_preserves_dynamic_body_and_validation_request_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/BackendController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import jakarta.servlet.http.HttpServletRequest;
+                import jakarta.validation.constraints.NotBlank;
+                import org.springframework.validation.annotation.Validated;
+                import org.springframework.web.bind.annotation.PostMapping;
+                import org.springframework.web.bind.annotation.RequestBody;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RequestParam;
+                import org.springframework.web.bind.annotation.RestController;
+
+                import java.util.Map;
+
+                @RestController
+                @RequestMapping("/backend")
+                public class BackendController {
+
+                    @PostMapping("/update-user-auth")
+                    public Response<String> updateUserAuth(
+                        @Validated @RequestBody(required = false) Map<String, Object> param,
+                        HttpServletRequest request,
+                        @RequestParam(defaultValue = "ALL") @NotBlank String corpName
+                    ) {
+                        return null;
+                    }
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.BackendController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec = load_spec_text(
+                store.files["services/demo-service/controllers/BackendController/BackendController.spec.yaml"]
+            )
+            method = spec.methods[0]
+            doc_text = store.files["services/demo-service/controllers/BackendController/BackendController.doc.md"]
+
+            self.assertEqual("Map<String,Object>", method.request.body.type)
+            self.assertFalse(method.request.body.required)
+            self.assertIn("非固定 schema", method.request.body.description or "")
+            self.assertEqual(["corpName"], [item.name for item in method.request.query_params])
+            self.assertFalse(method.request.query_params[0].required)
+            self.assertIn("@NotBlank", method.request.query_params[0].description)
+            self.assertIn("defaultValue=ALL", method.request.query_params[0].description)
+            self.assertEqual([], method.request.query_objects)
+            self.assertIn("动态对象，非固定 schema", doc_text)
+
+    def test_provider_sync_supports_package_private_controller_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/PackageController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import org.springframework.web.bind.annotation.GetMapping;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RestController;
+
+                @RestController
+                @RequestMapping("/pkg")
+                public class PackageController {
+
+                    @GetMapping("/ping")
+                    Response<String> ping() {
+                        return null;
+                    }
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.PackageController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec_text = store.files["services/demo-service/controllers/PackageController/PackageController.spec.yaml"]
+            self.assertIn("methodName: ping", spec_text)
+            self.assertIn("signature: ping()", spec_text)
+
+    def test_provider_sync_supports_supported_controller_discovery_for_fully_qualified_mapping_annotations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/FullyQualifiedController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+
+                @org.springframework.web.bind.annotation.RestController
+                @org.springframework.web.bind.annotation.RequestMapping("/fq")
+                public class FullyQualifiedController {
+
+                    @org.springframework.web.bind.annotation.GetMapping("/ping")
+                    public Response<String> ping() {
+                        return null;
+                    }
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.FullyQualifiedController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec_text = store.files[
+                "services/demo-service/controllers/FullyQualifiedController/FullyQualifiedController.spec.yaml"
+            ]
+            self.assertIn("basePath: /fq", spec_text)
+            self.assertIn("path: /ping", spec_text)
+
+    def test_provider_collects_missing_source_from_local_record_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/RecordDto.java",
+                """
+                package com.example.controller;
+
+                public record RecordDto(String id, Integer age) {
+                }
+                """,
+            )
+
+            schemas = provider_module._collect_type_schemas(provider_repo, "RecordDto")
+
+            self.assertEqual(1, len(schemas))
+            self.assertEqual("RecordDto", schemas[0].name)
+            self.assertEqual(["id", "age"], [field.name for field in schemas[0].fields])
 
     def test_provider_sync_class_level_ignore_removes_existing_contracts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -820,6 +1306,138 @@ class GitHubSourceWorkflowTest(unittest.TestCase):
             self.assertEqual("总记录数", field_map["totalCount"])
             self.assertEqual("创建人名称", field_map["creatorName"])
 
+    def test_provider_improves_field_description_from_annotations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/AnnotatedFieldDto.java",
+                """
+                package com.example.controller;
+
+                public class AnnotatedFieldDto {
+                    @Schema(description = "企业名称")
+                    private String corpName;
+
+                    @ApiModelProperty("联系人手机号")
+                    private String contactPhone;
+
+                    private String unknownField;
+                }
+                """,
+            )
+
+            schemas = provider_module._collect_type_schemas(provider_repo, "AnnotatedFieldDto")
+            field_map = {field.name: field.description for field in schemas[0].fields}
+
+            self.assertEqual("企业名称", field_map["corpName"])
+            self.assertEqual("联系人手机号", field_map["contactPhone"])
+            self.assertEqual("未提供说明", field_map["unknownField"])
+
+    def test_provider_collects_nested_referenced_type_schemas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/AddressDto.java",
+                """
+                package com.example.controller;
+
+                public class AddressDto {
+                    /**
+                     * 城市
+                     */
+                    private String city;
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/ProfileDto.java",
+                """
+                package com.example.controller;
+
+                public class ProfileDto {
+                    private AddressDto address;
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/UserPayload.java",
+                """
+                package com.example.controller;
+
+                public class UserPayload {
+                    private ProfileDto profile;
+                }
+                """,
+            )
+
+            schemas = provider_module._collect_type_schemas(provider_repo, "UserPayload")
+            names = [item.name for item in schemas]
+
+            self.assertIn("UserPayload", names)
+            self.assertIn("ProfileDto", names)
+            self.assertIn("AddressDto", names)
+
+    def test_provider_sync_extracts_business_exception_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/ErrorController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import org.springframework.web.bind.annotation.GetMapping;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RestController;
+
+                @RestController
+                @RequestMapping("/errors")
+                public class ErrorController {
+
+                    @GetMapping("/text")
+                    public Response<String> textError() {
+                        throw new BusinessException("企业不存在");
+                    }
+
+                    @GetMapping("/code")
+                    public Response<String> codeError() {
+                        throw new BusinessException(RespCode.USER_NOT_FOUND);
+                    }
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.ErrorController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec = load_spec_text(
+                store.files["services/demo-service/controllers/ErrorController/ErrorController.spec.yaml"]
+            )
+            doc_text = store.files["services/demo-service/controllers/ErrorController/ErrorController.doc.md"]
+            text_method = next(item for item in spec.methods if item.source.method_name == "textError")
+            code_method = next(item for item in spec.methods if item.source.method_name == "codeError")
+
+            self.assertEqual("BUSINESS_EXCEPTION", text_method.errors[0].code)
+            self.assertEqual("企业不存在", text_method.errors[0].meaning)
+            self.assertEqual("RespCode.USER_NOT_FOUND", code_method.errors[0].code)
+            self.assertIn("企业不存在", doc_text)
+            self.assertIn("RespCode.USER_NOT_FOUND", doc_text)
+
     def test_provider_parses_nonstandard_comment_terminator_without_trailing_slash(self) -> None:
         schema, _ = provider_module._parse_type_schema_from_source(
             "BaseDO",
@@ -1023,6 +1641,203 @@ class GitHubSourceWorkflowTest(unittest.TestCase):
 
             spec_text = store.files["services/demo-service/controllers/TreeController/TreeController.spec.yaml"]
             self.assertIn("dataType: List<Tree<Integer>>", spec_text)
+
+    def test_provider_sync_renders_response_wrapper_semantics_for_object_like_returns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/RoleController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import org.springframework.web.bind.annotation.GetMapping;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RestController;
+
+                @RestController
+                @RequestMapping("/role")
+                public class RoleController {
+
+                    @GetMapping("/raw")
+                    public Response raw() {
+                        return null;
+                    }
+
+                    @GetMapping("/wildcard")
+                    public Response<?> wildcard() {
+                        return null;
+                    }
+
+                    @GetMapping("/object")
+                    public Response<Object> objectResult() {
+                        return null;
+                    }
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.RoleController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec = load_spec_text(
+                store.files["services/demo-service/controllers/RoleController/RoleController.spec.yaml"]
+            )
+            doc_text = store.files["services/demo-service/controllers/RoleController/RoleController.doc.md"]
+
+            raw_method = next(item for item in spec.methods if item.source.method_name == "raw")
+            wildcard_method = next(item for item in spec.methods if item.source.method_name == "wildcard")
+            object_method = next(item for item in spec.methods if item.source.method_name == "objectResult")
+
+            self.assertEqual("Object", raw_method.response.data_type)
+            self.assertIn("未显式声明", raw_method.response.description)
+            self.assertIn("未显式声明", wildcard_method.response.description)
+            self.assertIn("通用对象", object_method.response.description)
+            self.assertIn("#### Response Types", doc_text)
+
+    def test_provider_collects_page_wrapper_schema_along_with_item_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/PageDTO.java",
+                """
+                package com.example.controller;
+
+                import java.util.List;
+
+                public class PageDTO<T> {
+                    private Integer page;
+                    private Integer pageSize;
+                    private Integer totalCount;
+                    private List<T> list;
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/PositionRoleNew.java",
+                """
+                package com.example.controller;
+
+                public class PositionRoleNew {
+                    private String id;
+                }
+                """,
+            )
+
+            schemas = provider_module._collect_type_schemas(provider_repo, "PageDTO<PositionRoleNew>")
+            names = [item.name for item in schemas]
+
+            self.assertIn("PageDTO", names)
+            self.assertIn("PositionRoleNew", names)
+
+    def test_provider_sync_renders_tree_and_inherited_response_types(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/Tree.java",
+                """
+                package com.example.controller;
+
+                import java.util.List;
+
+                public class Tree<T> {
+                    private T value;
+                    private String label;
+                    private List<Tree<T>> children;
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/SignRouterConfig.java",
+                """
+                package com.example.controller;
+
+                public class SignRouterConfig {
+                    private String routerName;
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/SignRouterConfigVo.java",
+                """
+                package com.example.controller;
+
+                public class SignRouterConfigVo extends SignRouterConfig {
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/ResponseTreeController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import org.springframework.web.bind.annotation.GetMapping;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RestController;
+
+                import java.util.List;
+
+                @RestController
+                @RequestMapping("/response-tree")
+                public class ResponseTreeController {
+
+                    @GetMapping("/tree")
+                    public Response<List<Tree<Integer>>> tree() {
+                        return null;
+                    }
+
+                    @GetMapping("/config")
+                    public Response<SignRouterConfigVo> config() {
+                        return null;
+                    }
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.ResponseTreeController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec = load_spec_text(
+                store.files[
+                    "services/demo-service/controllers/ResponseTreeController/ResponseTreeController.spec.yaml"
+                ]
+            )
+            doc_text = store.files[
+                "services/demo-service/controllers/ResponseTreeController/ResponseTreeController.doc.md"
+            ]
+
+            tree_method = next(item for item in spec.methods if item.source.method_name == "tree")
+            config_method = next(item for item in spec.methods if item.source.method_name == "config")
+
+            self.assertNotEqual([], tree_method.schemas.response_types)
+            self.assertIn("#### Tree", doc_text)
+            self.assertIn("children", doc_text)
+            self.assertIn("继承自", next(item for item in config_method.schemas.response_types if item.name == "SignRouterConfigVo").fields[0].description if any(item.name == "SignRouterConfigVo" and item.fields for item in config_method.schemas.response_types) else "")
 
     def test_provider_sync_supports_plain_string_return_methods(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -209,7 +209,7 @@ global.index.json -> service shard -> spec
 - `build_contract_store()` 已支持 `gitlab_api`
 - 本地编译检查通过
 - 本地 `unittest` 全量通过
-- 当前测试总数为 `30`
+- 当前测试总数为 `45`
 
 ### 已完成并做过真实回放
 

@@ -66,6 +66,7 @@ GENERIC_WRAPPER_TYPES = {
     "ExportResult",
     "Optional",
 }
+RESPONSE_SCHEMA_WRAPPER_TYPES = {"PageDTO", "Page", "IPage", "Tree"}
 _TYPE_SOURCE_CACHE: dict[str, str | None] = {}
 _TYPE_BINARY_JAR_CACHE: dict[str, tuple[Path, str] | None] = {}
 COMMON_FIELD_DESCRIPTION_MAP = {
@@ -93,6 +94,17 @@ COMMON_FIELD_DESCRIPTION_MAP = {
     "modifierName": "更新人名称",
     "modifyTime": "更新时间",
 }
+LOW_VALUE_SEARCH_TERMS = {"处理", "对象"}
+COMMENT_METADATA_PREFIXES = (
+    "yapi",
+    "author",
+    "date",
+    "time",
+    "since",
+    "link",
+    "url",
+    "see",
+)
 
 
 class ProviderSyncError(RuntimeError):
@@ -396,20 +408,33 @@ def _build_controller_spec(
                     headers=_to_params(parsed["headers"]),
                     path_params=_to_params(parsed["path_params"]),
                     query_params=_to_params(parsed["query_params"]),
+                    query_objects=_to_params(parsed["query_objects"]),
                     parts=_to_params(parsed["parts"]),
                     body=RequestBodyModel(
                         type=parsed["body"],
-                        required=bool(parsed["body"]),
-                        description=_request_description(parsed["name"]) if parsed["body"] else None,
+                        required=bool(parsed.get("body_required", False)),
+                        description=_request_description(
+                            parsed["name"],
+                            parsed["body"],
+                            bool(parsed.get("body_required", False)),
+                        )
+                        if parsed["body"]
+                        else None,
                     ),
                 ),
                 response=ResponseModel(
                     envelope_type=existing_method.response.envelope_type if existing_method else response_envelope,
                     data_type=response_type,
-                    description=_response_description(parsed["name"], parsed["http_method"], parsed["path"], response_type),
+                    description=_response_description(
+                        parsed["name"],
+                        parsed["http_method"],
+                        parsed["path"],
+                        response_type,
+                        str(parsed.get("response_kind", "")),
+                    ),
                 ),
                 schemas=MethodSchemas(request_types=request_types, response_types=response_types),
-                errors=list(existing_method.errors) if existing_method else [],
+                errors=_extract_method_errors(parsed["body_text"]) or (list(existing_method.errors) if existing_method else []),
                 source=MethodSourceModel(
                     class_name=controller_name,
                     method_name=parsed["name"],
@@ -518,31 +543,52 @@ def _parse_type_schema(provider_repo: Path, type_name: str) -> tuple[TypeSchemaM
     raise ProviderSyncError(f"缺少类型源码: {type_name}")
 
 
-def _collect_type_schemas(provider_repo: Path, type_name: str | None) -> list[TypeSchemaModel]:
-    if not type_name or _is_scalar_type(type_name):
+def _collect_type_schemas(
+    provider_repo: Path,
+    type_name: str | None,
+    seen: set[str] | None = None,
+) -> list[TypeSchemaModel]:
+    if not type_name or _is_scalar_type(type_name) or _is_type_variable(type_name):
         return []
     normalized = type_name.replace(" ", "")
+    seen = set() if seen is None else set(seen)
+    if normalized in seen:
+        return []
+    seen.add(normalized)
     if "<" in normalized and ">" in normalized:
         raw_type = _raw_generic_type(normalized)
         result: list[TypeSchemaModel] = []
-        if raw_type not in GENERIC_WRAPPER_TYPES:
+        if raw_type in RESPONSE_SCHEMA_WRAPPER_TYPES:
             try:
-                result.extend(_collect_type_schemas(provider_repo, raw_type))
+                result.extend(_collect_type_schemas(provider_repo, raw_type, seen))
+            except ProviderSyncError:
+                pass
+        elif raw_type not in GENERIC_WRAPPER_TYPES:
+            try:
+                result.extend(_collect_type_schemas(provider_repo, raw_type, seen))
             except ProviderSyncError:
                 pass
         for arg in _generic_arguments(normalized):
-            result.extend(_collect_type_schemas(provider_repo, arg))
+            result.extend(_collect_type_schemas(provider_repo, arg, seen))
         return _dedupe_types(result)
     schema, parent = _parse_type_schema(provider_repo, type_name)
     result = []
     if parent and not _is_scalar_type(parent):
         try:
-            result.extend(_collect_type_schemas(provider_repo, parent))
+            result.extend(_collect_type_schemas(provider_repo, parent, seen))
         except ProviderSyncError:
             # External base classes such as company shared PageQuery should enrich the schema
             # when source is available, but should not block the whole controller sync if not.
             pass
     result.append(schema)
+    for field in schema.fields:
+        field_type = field.type
+        if not field_type or _is_scalar_type(field_type) or _is_type_variable(field_type):
+            continue
+        try:
+            result.extend(_collect_type_schemas(provider_repo, field_type, seen))
+        except ProviderSyncError:
+            continue
     return result
 
 
@@ -552,6 +598,24 @@ def _parse_type_schema_from_source(type_name: str, source: str) -> tuple[TypeSch
     extends_match = re.search(rf"class\s+{class_name}\s+extends\s+(?P<parent>\w+)", class_source)
     parent_type = extends_match.group("parent") if extends_match else None
     fields: list[FieldSchemaModel] = []
+    record_match = re.search(rf"record\s+{re.escape(class_name)}\s*\((?P<components>[^)]*)\)", class_source)
+    if record_match:
+        for component in _split_params(record_match.group("components")):
+            component_text = component.strip()
+            if not component_text:
+                continue
+            component_match = re.match(r"(?P<type>[A-Za-z0-9_<>?,. ]+)\s+(?P<name>\w+)$", component_text)
+            if not component_match:
+                continue
+            field_name = component_match.group("name")
+            fields.append(
+                FieldSchemaModel(
+                    name=field_name,
+                    type=component_match.group("type").replace(" ", ""),
+                    required=False,
+                    description=_infer_field_description(field_name) or "未提供说明",
+                )
+            )
     current_comment = ""
     constraints: list[str] = []
     in_class_body = False
@@ -571,19 +635,30 @@ def _parse_type_schema_from_source(type_name: str, source: str) -> tuple[TypeSch
                 constraints.append(line)
         elif re.match(r"private\s+[\w<>?,. ]+\s+\w+;", line):
             field_match = re.match(r"private\s+(?P<type>[\w<>?,. ]+)\s+(?P<name>\w+);", line)
+            field_name = field_match.group("name")
+            description = _field_description_from_sources(current_comment, constraints, field_name)
             fields.append(
                 FieldSchemaModel(
-                    name=field_match.group("name"),
+                    name=field_name,
                     type=field_match.group("type").replace(" ", ""),
                     required=any(_annotation_name(item) in REQUIRED_FIELD_ANNOTATIONS for item in constraints),
                     constraints=constraints.copy(),
-                    description=current_comment or _infer_field_description(field_match.group("name")),
+                    description=description,
                 )
             )
             current_comment = ""
             constraints = []
         elif line and in_class_body and not line.startswith(("public", "private", "protected")):
             constraints = []
+    if parent_type and not fields:
+        fields.append(
+            FieldSchemaModel(
+                name="inheritance",
+                type=parent_type,
+                required=False,
+                description=f"继承自 {parent_type}",
+            )
+        )
     return TypeSchemaModel(name=class_name, fields=fields), parent_type
 
 
@@ -594,7 +669,7 @@ def _annotation_name(annotation: str) -> str:
 def _find_imported_fqcn(provider_repo: Path, type_name: str) -> str | None:
     for file_path in provider_repo.rglob("*.java"):
         text = file_path.read_text(encoding="utf-8")
-        if f"class {type_name}" in text:
+        if re.search(rf"\b(?:class|record|enum)\s+{re.escape(type_name)}\b", text):
             package = re.search(r"package\s+([a-zA-Z0-9_.]+);", text)
             if package:
                 return f"{package.group(1)}.{type_name}"
@@ -718,16 +793,21 @@ def _normalize_response_type(text: str) -> str:
     return normalized
 
 
-def _parse_return_type(return_type: str) -> tuple[str, str]:
+def _parse_return_type(return_type: str) -> tuple[str, str, str]:
     normalized = return_type.strip()
     compact = normalized.replace(" ", "")
     if compact == "void":
-        return "", "void"
+        return "", "void", ""
     if compact == "Response":
-        return "Response", "Object"
+        return "Response", "Object", "raw"
     if compact.startswith("Response<") and compact.endswith(">"):
-        return "Response", _normalize_response_type(compact[len("Response<") : -1])
-    return "", _normalize_response_type(compact)
+        inner = compact[len("Response<") : -1]
+        if inner == "?":
+            return "Response", "Object", "wildcard"
+        if inner == "Object":
+            return "Response", "Object", "object"
+        return "Response", _normalize_response_type(inner), ""
+    return "", _normalize_response_type(compact), ""
 
 
 def _is_scalar_type(type_name: str) -> bool:
@@ -798,28 +878,31 @@ def _extract_summary(comment: str, method_name: str, http_method: str, path: str
         return lines[0]
     action = _infer_action(method_name, http_method)
     target = _infer_target_label(path, body_type, response_type)
-    return f"{action}{target}" if action != "查询列表" else f"查询{target}列表"
+    return _build_summary(action, target)
 
 
 def _description_for(method_name: str, http_method: str, path: str, body_type: str | None, response_type: str) -> str:
     action = _infer_action(method_name, http_method)
     target = _infer_target_label(path, body_type, response_type)
-    return f"{action}{target}并返回结果"
+    return _build_description(action, target)
 
 
-def _request_description(method_name: str) -> str:
+def _request_description(method_name: str, body_type: str | None, required: bool) -> str:
+    if _is_dynamic_body_type(body_type):
+        required_text = "必填" if required else "可选"
+        return f"动态对象，非固定 schema（{required_text}）"
     readable = "".join(_split_identifier(method_name))
     return f"{readable or method_name} 请求体"
 
 
-def _response_description(method_name: str, http_method: str, path: str, response_type: str) -> str:
+def _response_description(method_name: str, http_method: str, path: str, response_type: str, response_kind: str = "") -> str:
+    if response_kind in {"raw", "wildcard"}:
+        return "响应体未显式声明，按通用对象处理"
+    if response_kind == "object":
+        return "通用对象返回结果"
     action = _infer_action(method_name, http_method)
     target = _infer_target_label(path, None, response_type)
-    if action == "查询列表":
-        return f"{target}列表"
-    if action == "查询详情":
-        return f"{target}详情"
-    return f"{target}返回结果"
+    return _build_response_description(action, target)
 
 
 def _intent_aliases_for(summary: str, method_name: str, path: str, body_type: str | None, response_type: str, headers: list[dict], path_params: list[dict], query_params: list[dict], parts: list[dict]) -> list[str]:
@@ -829,7 +912,7 @@ def _intent_aliases_for(summary: str, method_name: str, path: str, body_type: st
     aliases.extend(_path_tokens(path))
     aliases.extend(item["name"] for item in [*headers, *path_params, *query_params, *parts])
     aliases.extend(_split_identifier(method_name))
-    return _dedupe_strings(aliases)
+    return _clean_search_values(aliases)
 
 
 def _tags_for(method_name: str, path: str, body_type: str | None, response_type: str) -> list[str]:
@@ -838,12 +921,12 @@ def _tags_for(method_name: str, path: str, body_type: str | None, response_type:
         tags.append(body_type)
     if response_type:
         tags.append(response_type.replace("List<", "").replace(">", ""))
-    return _dedupe_strings(tags)
+    return _clean_search_values(tags)
 
 
 def _infer_action(method_name: str, http_method: str) -> str:
     lowered = method_name.lower()
-    if lowered in {"query", "list", "page", "search", "find"}:
+    if lowered in {"query", "list", "page", "search", "find"} or "query" in lowered or lowered.endswith("list"):
         return "查询列表"
     if lowered in {"detail", "get", "info", "load"}:
         return "查询详情"
@@ -853,15 +936,29 @@ def _infer_action(method_name: str, http_method: str) -> str:
         return "更新"
     if lowered in {"delete", "remove", "cancel"}:
         return "删除"
+    if lowered in {"send", "push"} or lowered.startswith("send") or lowered.startswith("push"):
+        return "发送"
+    if "callback" in lowered or "notify" in lowered:
+        return "接收"
     if lowered in {"execute", "run", "submit", "start"}:
         return "执行"
-    return "处理"
+    if http_method == "GET":
+        return "查询"
+    if http_method == "POST":
+        return "提交"
+    if http_method == "PUT":
+        return "更新"
+    if http_method == "DELETE":
+        return "删除"
+    return "执行"
 
 
 def _infer_target_label(path: str, body_type: str | None, response_type: str) -> str:
     path_tokens = _path_tokens(path)
     if path_tokens:
-        return "".join(_translate_token(token) for token in path_tokens[-2:]) or "对象"
+        label = "".join(_translate_token(token) for token in path_tokens[-2:])
+        if label:
+            return label
     for candidate in (body_type, response_type):
         label = _humanize_type_name(candidate)
         if label:
@@ -880,15 +977,48 @@ def _humanize_type_name(type_name: str | None) -> str:
 
 
 def _split_identifier(value: str) -> list[str]:
+    value = re.sub(r"call\s*back", "Callback", value, flags=re.IGNORECASE)
+    value = re.sub(r"dynamicsql", "DynamicSql", value, flags=re.IGNORECASE)
+    value = re.sub(r"tmpposition", "TmpPosition", value, flags=re.IGNORECASE)
     return re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", value)
 
 
 def _path_tokens(path: str) -> list[str]:
-    return [token for token in path.strip("/").split("/") if token and not token.startswith("{")]
+    return [
+        token
+        for token in path.strip("/").split("/")
+        if token and not token.startswith("{") and not _is_low_value_search_value(token)
+    ]
 
 
 def _translate_token(token: str) -> str:
-    mapping = {"task": "任务", "record": "记录", "records": "记录", "workflow": "工作流", "execute": "执行", "detail": "详情", "query": "查询", "user": "用户", "admin": "管理员", "log": "日志"}
+    mapping = {
+        "task": "任务",
+        "record": "记录",
+        "records": "记录",
+        "workflow": "工作流",
+        "execute": "执行",
+        "detail": "详情",
+        "query": "查询",
+        "user": "用户",
+        "admin": "管理员",
+        "log": "日志",
+        "notify": "通知",
+        "callback": "回调",
+        "send": "发送",
+        "push": "推送",
+        "login": "登录",
+        "register": "注册",
+        "sms": "短信",
+        "message": "消息",
+        "role": "角色",
+        "current": "当前",
+        "list": "列表",
+        "tmp": "临时",
+        "position": "岗位",
+        "dynamic": "动态",
+        "sql": "查询",
+    }
     if re.search(r"[\u4e00-\u9fff]", token):
         return token
     return mapping.get(token.lower(), token.capitalize())
@@ -924,10 +1054,83 @@ def _comment_lines(block: str) -> list[str]:
         stripped = stripped.lstrip("*").replace("*/", "").strip()
         stripped = re.sub(r"</?[^>]+>", "", stripped).strip()
         stripped = re.sub(r"/+$", "", stripped).strip()
-        if not stripped or stripped.startswith("@"):
+        stripped = _normalize_comment_line(stripped)
+        if not stripped or stripped.startswith("@") or _is_comment_metadata_line(stripped):
             continue
         cleaned_lines.append(stripped)
     return cleaned_lines
+
+
+def _normalize_comment_line(line: str) -> str:
+    normalized = re.sub(r"^\d{3,4}[\s:：._-]*", "", line).strip()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def _is_comment_metadata_line(line: str) -> bool:
+    lowered = line.strip().lower()
+    if not lowered:
+        return True
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        return True
+    if any(lowered.startswith(prefix) for prefix in COMMENT_METADATA_PREFIXES):
+        return True
+    return "http://" in lowered or "https://" in lowered
+
+
+def _build_summary(action: str, target: str) -> str:
+    if action == "查询列表":
+        return target if target.endswith("列表") else f"查询{target}列表"
+    if action == "查询详情":
+        return target if target.endswith("详情") else f"查询{target}详情"
+    if action == "接收":
+        return f"接收{target}"
+    if action == "查询":
+        return f"查询{target}"
+    if action == "提交":
+        return f"提交{target}"
+    return f"{action}{target}"
+
+
+def _build_description(action: str, target: str) -> str:
+    if action == "查询列表":
+        return target if target.endswith("列表") else f"查询{target}列表"
+    if action == "查询详情":
+        return target if target.endswith("详情") else f"查询{target}详情"
+    if action == "接收":
+        return f"接收{target}请求"
+    if action == "查询":
+        return f"查询{target}信息"
+    if action == "提交":
+        return f"提交{target}请求"
+    if action in {"发送", "推送"}:
+        return f"{action}{target}"
+    return f"{action}{target}"
+
+
+def _build_response_description(action: str, target: str) -> str:
+    if action == "查询列表":
+        return target if target.endswith("列表") else f"{target}列表"
+    if action == "查询详情":
+        return target if target.endswith("详情") else f"{target}详情"
+    if action == "接收":
+        return f"{target}结果"
+    if action in {"查询", "提交", "执行", "发送", "推送", "新增", "更新", "删除"}:
+        return f"{target}结果"
+    return f"{target}信息"
+
+
+def _clean_search_values(values: list[str]) -> list[str]:
+    return _dedupe_strings([value for value in values if not _is_low_value_search_value(value)])
+
+
+def _is_low_value_search_value(value: str) -> bool:
+    normalized = str(value).strip()
+    if not normalized:
+        return True
+    compact = re.sub(r"[\s_\-/]+", "", normalized).lower()
+    if not compact or compact in LOW_VALUE_SEARCH_TERMS:
+        return True
+    return compact.isdigit()
 
 
 def _is_comment_terminator(line: str) -> bool:
@@ -1036,7 +1239,6 @@ def _can_prompt() -> bool:
 
 
 def _parse_methods(controller_source: str) -> list[dict[str, object]]:
-    mapping_tokens = ("@PostMapping", "@GetMapping", "@PutMapping", "@DeleteMapping", "@RequestMapping")
     lines = controller_source.splitlines()
     methods: list[dict[str, object]] = []
     comment_lines: list[str] = []
@@ -1057,14 +1259,14 @@ def _parse_methods(controller_source: str) -> list[dict[str, object]]:
                 capturing_comment = False
             index += 1
             continue
-        if stripped.startswith("@") and not any(token in stripped for token in mapping_tokens):
+        if stripped.startswith("@") and not _contains_mapping_annotation(stripped):
             annotation_lines.append(raw_line)
             index += 1
             continue
-        if comment_lines and stripped and not stripped.startswith("@") and not any(token in stripped for token in mapping_tokens):
+        if comment_lines and stripped and not stripped.startswith("@") and not _contains_mapping_annotation(stripped):
             comment_lines = []
             annotation_lines = []
-        if any(token in stripped for token in mapping_tokens):
+        if _contains_mapping_annotation(stripped):
             mapping_lines = [raw_line]
             while "(" in mapping_lines[0] and ")" not in mapping_lines[-1]:
                 index += 1
@@ -1085,7 +1287,7 @@ def _parse_methods(controller_source: str) -> list[dict[str, object]]:
                 index += 1
             signature_text = re.sub(r"\s+", " ", " ".join(item.strip() for item in signature_lines))
             signature_match = re.search(
-                r"public\s+(?P<return_type>[A-Za-z0-9_<>?,.\[\] ]+?)\s+(?P<name>\w+)\s*\(",
+                r"(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?(?P<return_type>(?!class\b|record\b|interface\b)[A-Za-z0-9_<>?,.\[\] ]+?)\s+(?P<name>\w+)\s*\(",
                 signature_text,
             )
             if not signature_match:
@@ -1094,7 +1296,8 @@ def _parse_methods(controller_source: str) -> list[dict[str, object]]:
                     index += 1
                     continue
                 raise ProviderSyncError("Unsupported method signature")
-            response_envelope, response_type = _parse_return_type(signature_match.group("return_type"))
+            body_text, index = _consume_method_block(lines, index, signature_lines)
+            response_envelope, response_type, response_kind = _parse_return_type(signature_match.group("return_type"))
             params_text = _extract_method_params(signature_text, signature_match.end() - 1)
             parsed_params = _parse_signature_params(params_text)
             methods.append(
@@ -1105,8 +1308,11 @@ def _parse_methods(controller_source: str) -> list[dict[str, object]]:
                     "http_method": http_method,
                     "response_envelope": response_envelope,
                     "response": response_type,
+                    "response_kind": response_kind,
+                    "body_text": body_text,
                     "name": signature_match.group("name"),
                     "body": parsed_params["body"]["type"] if parsed_params["body"] else None,
+                    "body_required": parsed_params["body"]["required"] if parsed_params["body"] else False,
                     "headers": parsed_params["headers"],
                     "path_params": parsed_params["path_params"],
                     "query_params": parsed_params["query_params"],
@@ -1125,39 +1331,43 @@ def _extract_mapping_path(mapping_text: str) -> str | None:
     named_match = re.search(r'(?:value|path)\s*=\s*"(?P<path>[^"]+)"', mapping_text)
     if named_match:
         return named_match.group("path")
-    literal_match = re.search(r'Mapping\s*\(\s*"(?P<path>[^"]+)"', mapping_text)
+    literal_match = re.search(r'(?:[\w.]+\.)?Mapping\s*\(\s*"(?P<path>[^"]+)"', mapping_text)
     if literal_match:
         return literal_match.group("path")
-    bare_shortcut_match = re.search(r"@(?:Post|Get|Put|Delete)Mapping\b(?!\s*\()", mapping_text)
+    bare_shortcut_match = re.search(r"@(?:[\w.]+\.)?(?:Post|Get|Put|Delete|Patch)Mapping\b(?!\s*\()", mapping_text)
     if bare_shortcut_match:
         return ""
-    bare_request_mapping_match = re.search(r"@RequestMapping\b(?!\s*\()", mapping_text)
+    bare_request_mapping_match = re.search(r"@(?:[\w.]+\.)?RequestMapping\b(?!\s*\()", mapping_text)
     if bare_request_mapping_match:
         return ""
     return None
 
 
 def _extract_http_method(mapping_text: str) -> str | None:
-    shortcut_match = re.search(r"@(?P<annotation>Post|Get|Put|Delete)Mapping\b", mapping_text)
+    shortcut_match = re.search(r"@(?:[\w.]+\.)?(?P<annotation>Post|Get|Put|Delete|Patch)Mapping\b", mapping_text)
     if shortcut_match:
         return shortcut_match.group("annotation").upper()
-    request_mapping_match = re.search(r"@RequestMapping\b", mapping_text)
+    request_mapping_match = re.search(r"@(?:[\w.]+\.)?RequestMapping\b", mapping_text)
     if not request_mapping_match:
         return None
-    method_match = re.search(r"method\s*=\s*RequestMethod\.(?P<method>GET|POST|PUT|DELETE)", mapping_text)
+    method_match = re.search(r"method\s*=\s*RequestMethod\.(?P<method>GET|POST|PUT|DELETE|PATCH)", mapping_text)
     if method_match:
         return method_match.group("method")
     return "REQUEST"
 
 
 def _extract_controller_base_path(controller_source: str) -> str:
-    controller_request_mapping = re.search(r"@RequestMapping\s*\((?P<args>[^)]*)\)", controller_source, re.DOTALL)
+    controller_request_mapping = re.search(r"@(?:[\w.]+\.)?RequestMapping\s*\((?P<args>[^)]*)\)", controller_source, re.DOTALL)
     if not controller_request_mapping:
         return ""
     path_value = _extract_mapping_path(controller_request_mapping.group(0))
     if not path_value:
         return ""
     return path_value
+
+
+def _contains_mapping_annotation(text: str) -> bool:
+    return re.search(r"@(?:[\w.]+\.)?(?:Post|Get|Put|Delete|Patch)?Request?Mapping\b|@(?:[\w.]+\.)?(?:Post|Get|Put|Delete|Patch)Mapping\b", text) is not None
 
 
 def _extract_method_params(signature_text: str, opening_paren_index: int) -> str:
@@ -1172,6 +1382,18 @@ def _extract_method_params(signature_text: str, opening_paren_index: int) -> str
             depth -= 1
         chars.append(char)
     return "".join(chars)
+
+
+def _consume_method_block(lines: list[str], start_index: int, signature_lines: list[str]) -> tuple[str, int]:
+    block_lines = list(signature_lines)
+    depth = sum(line.count("{") - line.count("}") for line in signature_lines)
+    current_index = start_index
+    while depth > 0 and current_index + 1 < len(lines):
+        current_index += 1
+        line = lines[current_index]
+        block_lines.append(line)
+        depth += line.count("{") - line.count("}")
+    return "\n".join(block_lines), current_index
 
 
 def _parse_signature_params(params_text: str) -> dict[str, object]:
@@ -1194,18 +1416,53 @@ def _parse_signature_params(params_text: str) -> dict[str, object]:
         param_name = param_match.group("name")
         signature_params.append({"type": param_type, "name": param_name})
         if "@RequestBody" in cleaned:
-            body = {"type": param_type, "name": param_name}
+            required = "required = false" not in cleaned and "required=false" not in cleaned
+            body = {"type": param_type, "name": param_name, "required": required}
         elif "@PathVariable" in cleaned:
             path_params.append({"name": param_name, "type": param_type, "required": True, "description": ""})
         elif "@RequestParam" in cleaned:
-            required = "required = false" not in cleaned and "required=false" not in cleaned
-            query_params.append({"name": param_name, "type": param_type, "required": required, "description": ""})
+            required = (
+                "required = false" not in cleaned
+                and "required=false" not in cleaned
+                and "defaultValue" not in cleaned
+            )
+            description = _build_param_description(cleaned, param_type)
+            item = {"name": param_name, "type": param_type, "required": required, "description": description}
+            if _is_file_type(param_type):
+                if not description:
+                    item["description"] = "文件上传字段"
+                parts.append(item)
+            else:
+                query_params.append(item)
         elif "@RequestHeader" in cleaned:
-            headers.append({"name": param_name, "type": param_type, "required": True, "description": ""})
+            headers.append(
+                {
+                    "name": param_name,
+                    "type": param_type,
+                    "required": True,
+                    "description": _build_param_description(cleaned, param_type),
+                }
+            )
         elif "@RequestPart" in cleaned:
-            parts.append({"name": param_name, "type": param_type, "required": True, "description": ""})
+            parts.append(
+                {
+                    "name": param_name,
+                    "type": param_type,
+                    "required": True,
+                    "description": _build_part_description(param_type, cleaned),
+                }
+            )
+        elif _is_infrastructure_type(param_type):
+            continue
         elif not _is_scalar_type(param_type):
-            query_objects.append({"name": param_name, "type": param_type, "required": False, "description": ""})
+            query_objects.append(
+                {
+                    "name": param_name,
+                    "type": param_type,
+                    "required": False,
+                    "description": "按 query object 参与请求",
+                }
+            )
     return {
         "body": body,
         "headers": headers,
@@ -1234,3 +1491,99 @@ def _split_params(text: str) -> list[str]:
     if current:
         parts.append("".join(current))
     return parts
+
+
+def _build_param_description(raw_text: str, param_type: str) -> str:
+    details: list[str] = []
+    constraints = _extract_validation_constraints(raw_text)
+    if constraints:
+        details.append("约束: " + ", ".join(constraints))
+    default_value = _extract_default_value(raw_text)
+    if default_value is not None:
+        details.append(f"defaultValue={default_value}")
+    if _is_file_type(param_type):
+        details.append("文件上传字段")
+    return "; ".join(details)
+
+
+def _build_part_description(param_type: str, raw_text: str) -> str:
+    if _is_file_type(param_type):
+        return "文件上传字段"
+    return _build_param_description(raw_text, param_type)
+
+
+def _extract_validation_constraints(raw_text: str) -> list[str]:
+    return re.findall(
+        r"@(?:NotBlank|NotNull|NotEmpty|Size|Length|Pattern|Min|Max|Valid|Validated)\b(?:\([^)]*\))?",
+        raw_text,
+    )
+
+
+def _extract_default_value(raw_text: str) -> str | None:
+    match = re.search(r'defaultValue\s*=\s*"([^"]*)"', raw_text)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _is_file_type(type_name: str) -> bool:
+    normalized = type_name.replace(" ", "")
+    return normalized in {"MultipartFile", "MultipartFile[]", "MultipartFile..."}
+
+
+def _is_dynamic_body_type(type_name: str | None) -> bool:
+    if not type_name:
+        return False
+    normalized = type_name.replace(" ", "")
+    return normalized in {"Map<String,Object>", "JSONObject", "JsonObject"}
+
+
+def _is_infrastructure_type(type_name: str) -> bool:
+    normalized = type_name.replace(" ", "")
+    return normalized in {"HttpServletRequest", "HttpServletResponse"}
+
+
+def _field_description_from_sources(comment: str, constraints: list[str], field_name: str) -> str:
+    if comment:
+        return comment
+    annotation_description = _extract_field_annotation_description(constraints)
+    if annotation_description:
+        return annotation_description
+    inferred = _infer_field_description(field_name)
+    if inferred:
+        return inferred
+    return "未提供说明"
+
+
+def _extract_field_annotation_description(constraints: list[str]) -> str:
+    for annotation in constraints:
+        schema_match = re.search(r'description\s*=\s*"([^"]+)"', annotation)
+        if schema_match:
+            return schema_match.group(1).strip()
+        model_match = re.search(r'@ApiModelProperty\(\s*(?:value\s*=\s*)?"([^"]+)"', annotation)
+        if model_match:
+            return model_match.group(1).strip()
+    return ""
+
+
+def _is_type_variable(type_name: str) -> bool:
+    normalized = type_name.replace(" ", "")
+    return re.fullmatch(r"[A-Z]", normalized) is not None
+
+
+def _extract_method_errors(method_block: str) -> list[MethodErrorModel]:
+    errors: list[MethodErrorModel] = []
+    seen: set[tuple[str, str, str]] = set()
+    for meaning in re.findall(r'throw\s+new\s+BusinessException\(\s*"([^"]+)"\s*\)', method_block):
+        item = ("BUSINESS_EXCEPTION", meaning.strip(), "直接抛出 BusinessException")
+        if item in seen:
+            continue
+        seen.add(item)
+        errors.append(MethodErrorModel(code=item[0], meaning=item[1], when=item[2]))
+    for code in re.findall(r"throw\s+new\s+BusinessException\(\s*([A-Za-z0-9_.]+)\s*\)", method_block):
+        item = (code.strip(), code.strip(), "直接抛出 BusinessException")
+        if item in seen:
+            continue
+        seen.add(item)
+        errors.append(MethodErrorModel(code=item[0], meaning=item[1], when=item[2]))
+    return errors
