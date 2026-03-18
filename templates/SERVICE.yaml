@@ -1,0 +1,19 @@
+identity:
+  domain: "<domain>"
+  service: "<service>"
+
+owner:
+  name: "<service-owner>"
+
+source:
+  repo: "<provider-repo>"
+
+target:
+  type: "service-name"
+  value: "<target>"
+  contextIdPrefix: ""
+
+pathRules:
+  pathPrefix: ""
+  basePathStyle: "controller-base-plus-method-path"
+  exceptions: []

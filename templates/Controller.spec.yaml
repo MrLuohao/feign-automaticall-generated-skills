@@ -1,0 +1,43 @@
+domain: "<domain>"
+service: "<service>"
+
+controller:
+  name: "<Controller>"
+  basePath: "<controller-base-path>"
+  source:
+    repo: "<provider-repo>"
+    file: "src/main/java/.../<Controller>.java"
+
+methods:
+  - identity:
+      operationId: "<operation-id>"
+    semantic:
+      summary: "<summary>"
+      description: "<description>"
+    search:
+      intentAliases: []
+      tags: []
+    protocol:
+      httpMethod: "POST"
+      path: "<method-path>"
+    request:
+      headers: []
+      pathParams: []
+      queryParams: []
+      parts: []
+      body:
+        type: null
+        required: false
+        description: null
+    response:
+      envelopeType: "Response"
+      dataType: "<ResponseType>"
+      description: "<response-description>"
+    schemas:
+      requestTypes: []
+      responseTypes: []
+    errors: []
+    source:
+      className: "<Controller>"
+      methodName: "<method-name>"
+      signature: "<method-signature>"
