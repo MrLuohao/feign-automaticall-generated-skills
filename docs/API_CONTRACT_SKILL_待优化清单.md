@@ -484,11 +484,16 @@
 
 ### P5. 真实 provider 仓库回放还需要继续做
 
-状态（2026-03-18）：
+状态（2026-03-19）：
 - Phase 6 已完成第一轮环境证据收集
 - 当前机器到 GitLab 的 SSH 通道可用，`git ls-remote git@gitlab.dstcar.com:dmp/ai-coding/dst-api-skills-repo.git` 可正常返回远端分支
-- 代表性 provider 仓库 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 当前不在本机固定路径内，本轮未继续做 bounded replay
-- 下一步需要先准备这些 provider 仓库的本地副本或明确可访问的远端路径，再继续 SSH 回放
+- 2026-03-19 已确认代表性 provider 仓库 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 本地副本均存在，且工作区干净
+- 2026-03-19 已在远端 contracts 仓库 `test` 分支完成 `dst-app-service` 与 `dst-app-bff-service` 的全量 controller sync
+- 本轮真实回放结果：
+  - `dst-app-service`: `14` 个 controller，`68` 个 operation
+  - `dst-app-bff-service`: `26` 个 controller，`85` 个 operation
+  - 总计 `40` 个 controller 同步成功，`0` 个失败
+- 当前剩余阻塞已缩小为：更高代表性的 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 还未执行 bounded replay
 
 建议样本：
 - `dst-user-core-service`
@@ -514,7 +519,7 @@
 
 1. `GitLabApiContractStore` 已实现
 2. `build_contract_store()` 已支持 `API_CONTRACT_SOURCE=gitlab_api`
-3. 当前本地测试总数为 `30` 条
+3. 当前本地测试总数为 `45` 条
 4. 当前本地测试全绿
 5. 默认 Git SSH 路径仍可真实写远端
 6. 已完成 HTTPS 链路基础排查，问题已收敛到服务端 TLS 握手早期断开
@@ -548,6 +553,6 @@
 ## 建议的下一步顺序
 
 1. 先协调网络/网关侧排 TLS/HTTPS API 问题
-2. 并行准备 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 的本地副本或明确可访问路径
+2. 在 `dst-app-service` / `dst-app-bff-service` 已完成回放的基础上，继续补 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 的 SSH bounded replay
 3. 如果 HTTPS 仍未恢复，继续优先走 SSH 做 bounded replay
 4. HTTPS 恢复后，再验证 token 权限、目标分支缺失和 rollback 提示

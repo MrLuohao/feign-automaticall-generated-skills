@@ -387,7 +387,7 @@ def _build_controller_spec(
         response_type = _normalize_response_type(parsed["response"])
         response_types = _collect_type_schemas(provider_repo, response_type)
         summary = _extract_summary(parsed["comment"], parsed["name"], parsed["http_method"], parsed["path"], parsed["body"], response_type)
-        description = _description_for(parsed["name"], parsed["http_method"], parsed["path"], parsed["body"], response_type)
+        description = _description_for(parsed["comment"], summary, parsed["name"], parsed["http_method"], parsed["path"], parsed["body"], response_type)
         operation_id = _resolve_operation_id(
             domain=domain,
             controller_name=controller_name,
@@ -426,6 +426,8 @@ def _build_controller_spec(
                     envelope_type=existing_method.response.envelope_type if existing_method else response_envelope,
                     data_type=response_type,
                     description=_response_description(
+                        parsed["comment"],
+                        summary,
                         parsed["name"],
                         parsed["http_method"],
                         parsed["path"],
@@ -434,7 +436,8 @@ def _build_controller_spec(
                     ),
                 ),
                 schemas=MethodSchemas(request_types=request_types, response_types=response_types),
-                errors=_extract_method_errors(parsed["body_text"]) or (list(existing_method.errors) if existing_method else []),
+                errors=_extract_method_errors(provider_repo, controller_source, parsed["body_text"])
+                or (list(existing_method.errors) if existing_method else []),
                 source=MethodSourceModel(
                     class_name=controller_name,
                     method_name=parsed["name"],
@@ -881,7 +884,18 @@ def _extract_summary(comment: str, method_name: str, http_method: str, path: str
     return _build_summary(action, target)
 
 
-def _description_for(method_name: str, http_method: str, path: str, body_type: str | None, response_type: str) -> str:
+def _description_for(
+    comment: str,
+    summary: str,
+    method_name: str,
+    http_method: str,
+    path: str,
+    body_type: str | None,
+    response_type: str,
+) -> str:
+    lines = _comment_lines(comment)
+    if lines:
+        return _join_comment_lines(lines[1:]) if len(lines) > 1 else summary
     action = _infer_action(method_name, http_method)
     target = _infer_target_label(path, body_type, response_type)
     return _build_description(action, target)
@@ -895,11 +909,21 @@ def _request_description(method_name: str, body_type: str | None, required: bool
     return f"{readable or method_name} 请求体"
 
 
-def _response_description(method_name: str, http_method: str, path: str, response_type: str, response_kind: str = "") -> str:
+def _response_description(
+    comment: str,
+    summary: str,
+    method_name: str,
+    http_method: str,
+    path: str,
+    response_type: str,
+    response_kind: str = "",
+) -> str:
     if response_kind in {"raw", "wildcard"}:
         return "响应体未显式声明，按通用对象处理"
     if response_kind == "object":
         return "通用对象返回结果"
+    if _comment_lines(comment):
+        return _response_description_from_summary(summary)
     action = _infer_action(method_name, http_method)
     target = _infer_target_label(path, None, response_type)
     return _build_response_description(action, target)
@@ -1117,6 +1141,22 @@ def _build_response_description(action: str, target: str) -> str:
     if action in {"查询", "提交", "执行", "发送", "推送", "新增", "更新", "删除"}:
         return f"{target}结果"
     return f"{target}信息"
+
+
+def _response_description_from_summary(summary: str) -> str:
+    if not summary:
+        return "结果"
+    if summary.startswith("分页查询") and len(summary) > len("分页查询"):
+        target = summary[len("分页查询") :].strip()
+        if target:
+            return f"{target}分页结果"
+    if summary.startswith("查询") and len(summary) > len("查询"):
+        target = summary[len("查询") :].strip()
+        if target.endswith(("详情", "列表", "信息")):
+            return target
+    if summary.endswith(("列表", "详情", "结果", "信息")):
+        return summary
+    return f"{summary}结果"
 
 
 def _clean_search_values(values: list[str]) -> list[str]:
@@ -1571,19 +1611,143 @@ def _is_type_variable(type_name: str) -> bool:
     return re.fullmatch(r"[A-Z]", normalized) is not None
 
 
-def _extract_method_errors(method_block: str) -> list[MethodErrorModel]:
+_DEPENDENCY_IMPL_CACHE: dict[tuple[str, str], Path | None] = {}
+
+
+def _extract_method_errors(provider_repo: Path, controller_source: str, method_block: str) -> list[MethodErrorModel]:
     errors: list[MethodErrorModel] = []
     seen: set[tuple[str, str, str]] = set()
-    for meaning in re.findall(r'throw\s+new\s+BusinessException\(\s*"([^"]+)"\s*\)', method_block):
-        item = ("BUSINESS_EXCEPTION", meaning.strip(), "直接抛出 BusinessException")
-        if item in seen:
-            continue
-        seen.add(item)
-        errors.append(MethodErrorModel(code=item[0], meaning=item[1], when=item[2]))
-    for code in re.findall(r"throw\s+new\s+BusinessException\(\s*([A-Za-z0-9_.]+)\s*\)", method_block):
-        item = (code.strip(), code.strip(), "直接抛出 BusinessException")
-        if item in seen:
-            continue
-        seen.add(item)
-        errors.append(MethodErrorModel(code=item[0], meaning=item[1], when=item[2]))
+    _collect_business_exception_errors(method_block, seen, errors, "直接抛出 BusinessException")
+    _collect_response_error_returns(method_block, seen, errors)
+    _collect_service_hop_errors(provider_repo, controller_source, method_block, seen, errors)
     return errors
+
+
+def _collect_business_exception_errors(
+    method_block: str,
+    seen: set[tuple[str, str, str]],
+    errors: list[MethodErrorModel],
+    when: str,
+) -> None:
+    for meaning in re.findall(r'throw\s+new\s+BusinessException\(\s*"([^"]+)"\s*\)', method_block):
+        _append_method_error(errors, seen, "BUSINESS_EXCEPTION", meaning.strip(), when)
+    for code, meaning in re.findall(
+        r'throw\s+new\s+BusinessException\(\s*([A-Za-z0-9_.]+)\s*(?:,\s*"([^"]+)")?\s*\)',
+        method_block,
+    ):
+        normalized_code = code.strip()
+        normalized_meaning = meaning.strip() if meaning.strip() else normalized_code
+        _append_method_error(errors, seen, normalized_code, normalized_meaning, when)
+
+
+def _collect_response_error_returns(
+    method_block: str,
+    seen: set[tuple[str, str, str]],
+    errors: list[MethodErrorModel],
+) -> None:
+    for meaning in re.findall(r'Response\.error\(\s*"([^"]+)"\s*\)', method_block):
+        _append_method_error(errors, seen, "BUSINESS_EXCEPTION", meaning.strip(), "返回 Response.error")
+    for code in re.findall(r"Response\.error\(\s*([A-Za-z0-9_.]+)\s*\)", method_block):
+        normalized_code = code.strip()
+        _append_method_error(errors, seen, normalized_code, normalized_code, "返回 Response.error")
+
+
+def _collect_service_hop_errors(
+    provider_repo: Path,
+    controller_source: str,
+    method_block: str,
+    seen: set[tuple[str, str, str]],
+    errors: list[MethodErrorModel],
+) -> None:
+    dependency_types = _extract_dependency_types(controller_source)
+    if not dependency_types:
+        return
+    processed_calls: set[tuple[str, str]] = set()
+    for dependency_name, method_name in re.findall(r"\b([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*\(", method_block):
+        dependency_type = dependency_types.get(dependency_name)
+        if not dependency_type:
+            continue
+        call_key = (dependency_type, method_name)
+        if call_key in processed_calls:
+            continue
+        processed_calls.add(call_key)
+        impl_file = _find_dependency_impl_file(provider_repo, dependency_type)
+        if impl_file is None:
+            continue
+        service_source = impl_file.read_text(encoding="utf-8")
+        service_method_block = _extract_named_method_block(service_source, method_name)
+        if not service_method_block:
+            continue
+        _collect_business_exception_errors(
+            service_method_block,
+            seen,
+            errors,
+            f"调用 {dependency_type}.{method_name} 时抛出 BusinessException",
+        )
+
+
+def _append_method_error(
+    errors: list[MethodErrorModel],
+    seen: set[tuple[str, str, str]],
+    code: str,
+    meaning: str,
+    when: str,
+) -> None:
+    item = (code, meaning, when)
+    if item in seen:
+        return
+    seen.add(item)
+    errors.append(MethodErrorModel(code=code, meaning=meaning, when=when))
+
+
+def _extract_dependency_types(source: str) -> dict[str, str]:
+    dependency_types: dict[str, str] = {}
+    for type_name, name in re.findall(
+        r"private\s+(?:final\s+)?([A-Za-z_][A-Za-z0-9_$.<>]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+        source,
+    ):
+        dependency_types[name] = type_name.split(".")[-1]
+    return dependency_types
+
+
+def _find_dependency_impl_file(provider_repo: Path, dependency_type: str) -> Path | None:
+    cache_key = (str(provider_repo), dependency_type)
+    if cache_key in _DEPENDENCY_IMPL_CACHE:
+        return _DEPENDENCY_IMPL_CACHE[cache_key]
+    impl_name = f"{dependency_type}Impl.java"
+    matches = list(provider_repo.rglob(impl_name))
+    if matches:
+        _DEPENDENCY_IMPL_CACHE[cache_key] = matches[0]
+        return matches[0]
+    implements_pattern = re.compile(rf"\bimplements\b[^{{;]*\b{re.escape(dependency_type)}\b")
+    for path in provider_repo.rglob("*.java"):
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if implements_pattern.search(source):
+            _DEPENDENCY_IMPL_CACHE[cache_key] = path
+            return path
+    _DEPENDENCY_IMPL_CACHE[cache_key] = None
+    return None
+
+
+def _extract_named_method_block(source: str, method_name: str) -> str | None:
+    pattern = re.compile(rf"\b{re.escape(method_name)}\s*\(")
+    for match in pattern.finditer(source):
+        opening_brace = source.find("{", match.end())
+        if opening_brace == -1:
+            continue
+        signature_slice = source[match.start() : opening_brace]
+        if ";" in signature_slice:
+            continue
+        depth = 0
+        for index in range(opening_brace, len(source)):
+            char = source[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[match.start() : index + 1]
+    return None

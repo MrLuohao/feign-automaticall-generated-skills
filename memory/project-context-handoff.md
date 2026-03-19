@@ -1,6 +1,6 @@
 # API Contract Client Workflow Handoff
 
-更新时间：2026-03-18
+更新时间：2026-03-19
 
 ## 当前阶段
 
@@ -28,6 +28,9 @@
   - 当前机器到 `gitlab.dstcar.com` HTTPS API 的 TLS 握手在 `ClientHello` 后被对端中断，导致 `gitlab_api` 模式尚未完成真实回放
 - 当前远端状态：
   - `dmp/ai-coding/dst-api-skills-repo` 的 `main` 已清空，适合重新做联调测试
+- 当前 provider 样本状态：
+  - `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 本地副本均已定位，且工作区干净，可直接进入 SSH bounded replay 准备
+  - `dst-app-service` 与 `dst-app-bff-service` 已于 2026-03-19 在远端 contracts 仓库 `test` 分支完成一轮全量 controller sync，结果为 `40` 成功 / `0` 失败
 - 当前优化规划状态：
   - 已完成待优化问题排查与分阶段路线拆分
   - 已写完 Phase 1 ~ Phase 6 的设计/实施计划文档
@@ -66,14 +69,10 @@
 
 ### 设计与计划文档
 
-已新增：
+已做精简：
 
-- `docs/plans/2026-03-17-gitlab-api-contract-store-design.md`
-- `docs/plans/2026-03-17-gitlab-api-contract-store.md`
-
-说明：
-
-- 早先 handoff 中提到的 `controller-parsing-compat` 两份计划文件当前仓库中不存在，不应再继续当作现存文件引用
+- 已删除已完成且只保留历史执行快照价值的旧计划文件
+- 当前只保留仍有直接续接价值的活文档
 
 ### remote store 能力
 
@@ -111,11 +110,13 @@
 已完成：
 
 - 默认 `github` / Git SSH 模式下，一轮最小 `provider sync + rebuild-index` 真实回放成功
+- `dst-app-service` 全量 `14` 个 controller 已真实同步到 `test` 分支，生成 `68` 个 operation
+- `dst-app-bff-service` 全量 `26` 个 controller 已真实同步到 `test` 分支，生成 `85` 个 operation
 
 未完成：
 
 - `gitlab_api` 模式真实远端回放
-- 代表性 provider 仓库 SSH bounded replay
+- `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 这组代表性 provider 仓库的 SSH bounded replay
 
 当前已确认的真实外部错误：
 
@@ -131,6 +132,8 @@
 - ICMP 可达，TCP `443` 可连接
 - 失败点在服务端 TLS 握手早期，不是本仓库 Python 代码、token 或 API 路径问题
 - SSH 通道可用，不属于 GitLab 账号或 SSH 密钥阻塞
+- 代表性 provider 仓库本地副本已存在，下一步不再是“找仓库”，而是“选 controller + 专用分支执行 bounded replay”
+- `dst-app-service` / `dst-app-bff-service` 已验证当前 parser 与远端写回链路在真实仓库上可跑通，剩余工作集中在继续扩大样本覆盖
 
 ## 当前仍未落实的优化点
 
@@ -165,7 +168,7 @@
   - fully-qualified Spring mapping 注解发现
   - 本地 `record` 类型源码定位与 schema 解析
 - 下一步：
-  - 先协调 TLS/HTTPS API 问题，再补 provider SSH bounded replay
+  - 先协调 TLS/HTTPS API 问题，再继续补 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 的 provider SSH bounded replay
 
 ### P2
 
@@ -173,7 +176,7 @@
   - `dst-user-core-service`
   - `dst-goods-server`
   - `dst-account-server`
-  - 当前阻塞：本机未发现上述仓库本地副本或明确可访问路径
+  - 当前阻塞：`dst-app-*` 已完成一轮回放，但 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 这组代表性样本仍未开始
 
 ### P3
 
@@ -182,27 +185,19 @@
   - 同名类型语义判定
   - source jar / binary jar / 本地源码优先级
 
-## 优化计划文档现状
+## 活文档现状
 
-已新增并可直接续接的计划文档：
+当前建议优先维护的文档：
 
-- `docs/plans/2026-03-18-api-contract-optimization-roadmap.md`
-- `docs/plans/2026-03-18-doc-quality-index-terms-phase1-design.md`
-- `docs/plans/2026-03-18-doc-quality-index-terms-phase1.md`
-- `docs/plans/2026-03-18-request-structure-phase2.md`
-- `docs/plans/2026-03-18-response-structure-phase3.md`
-- `docs/plans/2026-03-18-semantic-accuracy-phase4.md`
-- `docs/plans/2026-03-18-parser-compat-and-type-source-phase5.md`
+- `docs/API_CONTRACT_SKILL_待优化清单.md`
+- `docs/API_CONTRACT_SKILL_链路说明.md`
 - `docs/plans/2026-03-18-environment-and-real-replay-phase6.md`
+- `memory/project-context-handoff.md`
 
-当前推荐执行顺序：
+说明：
 
-1. Phase 1: 文档可读性与索引词质量
-2. Phase 2: 请求结构展示与输入语义
-3. Phase 3: 响应结构展示与包装类型
-4. Phase 4: 语义准确性与文档事实完整度
-5. Phase 5: parser 兼容性与类型源码回溯
-6. Phase 6: 环境与真实回放验证
+- Phase 1 ~ Phase 5 的详细实施计划与更早的 store 设计/实施计划已删除
+- 它们的有效结论已收敛进 README、待优化清单、Phase 6 和 handoff
 
 Phase 6 当前范围：
 
@@ -214,8 +209,8 @@ Phase 6 当前范围：
 
 - 每解决一个问题，必须同步更新：
   - `docs/API_CONTRACT_SKILL_待优化清单.md`
-  - 对应 phase 计划文档
-  - 若范围变化，再更新 roadmap / handoff
+  - 当前活跃计划文档
+  - 若范围变化，再更新 handoff
 
 ## 当前仓库事实与外部文档分叉
 
@@ -226,6 +221,8 @@ Phase 6 当前范围：
 - 已支持 GitLab API 写远端
 - 当前机器直接访问 GitLab HTTPS API 会在 `ClientHello` 后被对端提前断开
 - 远端 `main` 当前已清空
+- `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 本地副本均已存在且工作区干净
+- `dst-app-service` 与 `dst-app-bff-service` 已在远端 `test` 分支完成全量 controller sync
 
 外部文档目标已经写成：
 
@@ -242,6 +239,6 @@ Phase 6 当前范围：
 先读取 memory/project-context-handoff.md。
 当前 parser 兼容修复已完成，GitLab API contract store 也已落地，并且 45 条测试全绿。
 Phase 1 到 Phase 5 已完成，Phase 6 已补充 TLS/SSH 环境证据，但真实 API/SSH 回放还未完全闭环。
-下一步优先协调 TLS/HTTPS API 问题，并准备 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 的本地副本后继续回放。
+下一步优先协调 TLS/HTTPS API 问题，并在 `dst-app-*` 已验证通过的基础上继续推进 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 的 SSH bounded replay。
 每解决一个问题，同步更新待优化清单、对应计划文档和 handoff。
 ```

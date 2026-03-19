@@ -10,10 +10,10 @@
 
 ## Execution Status
 
-更新时间：2026-03-18
+更新时间：2026-03-19
 
 - 状态：部分完成
-- 已重跑 TLS 诊断，结果与历史判断一致：DNS/ICMP/TCP 通，HTTPS/TLS 在 `ClientHello` 后被对端提前断开
+- 已于 2026-03-19 复跑 TLS 诊断，结果与历史判断一致：DNS/ICMP/TCP 通，HTTPS/TLS 在 `ClientHello` 后被对端提前断开
 - 本轮证据：
   - `nslookup gitlab.dstcar.com` -> `198.18.0.13`
   - `ping -c 1 gitlab.dstcar.com` -> 0% packet loss
@@ -23,12 +23,20 @@
 - 已确认 SSH 通道可用：
   - `ssh -T git@gitlab.dstcar.com` -> `Welcome to GitLab, @luohao!`
   - `git ls-remote git@gitlab.dstcar.com:dmp/ai-coding/dst-api-skills-repo.git` -> 可读取 `main` / `test`
+- 已确认远端 contracts 仓库 `main` 仍是空树：
+  - `git clone --depth 1 git@gitlab.dstcar.com:dmp/ai-coding/dst-api-skills-repo.git /tmp/dst-api-skills-repo-phase6-check`
+  - clone 结果仅包含 `.git/*`，工作树无 contracts 文件
+- 已完成一轮真实 SSH bounded replay：
+  - 使用 `API_CONTRACT_GITHUB_BRANCH=test`
+  - 已同步 `dst-app-service` 全量 `14` 个 controller，生成 `68` 个 operation
+  - 已同步 `dst-app-bff-service` 全量 `26` 个 controller，生成 `85` 个 operation
+  - 本轮结果：`40` 个 controller 全部同步成功，`0` 个失败
 - 未完成项：
-  - 代表性 provider 仓库 SSH bounded replay：本机未找到 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 本地副本
+  - 代表性 provider 仓库 SSH bounded replay：`dst-app-service` 与 `dst-app-bff-service` 已在 `test` 分支完成一轮全量 controller 回放，但 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 这组更高代表性的样本仍未执行
   - GitLab API token/branch/rollback 真实验证：仍被 HTTPS/TLS 阻塞
 - 当前建议：
   - 优先由网络/网关侧排 TLS 问题
-  - 准备 provider 仓库本地副本后再补 SSH bounded replay
+  - 在已有 `dst-app-*` 结果基础上，继续补 `dst-user-core-service`、`dst-goods-server`、`dst-account-server` 的 bounded replay
 
 ---
 

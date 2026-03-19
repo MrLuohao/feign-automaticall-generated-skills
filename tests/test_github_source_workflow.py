@@ -674,6 +674,279 @@ class GitHubSourceWorkflowTest(unittest.TestCase):
             self.assertNotIn("返回结果", method.response.description)
             self.assertNotIn("CallBack", method.response.description)
 
+    def test_provider_sync_prefers_javadoc_summary_for_description_and_response_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/IamUserController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import org.springframework.validation.annotation.Validated;
+                import org.springframework.web.bind.annotation.PostMapping;
+                import org.springframework.web.bind.annotation.RequestBody;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RestController;
+
+                @RestController
+                @RequestMapping("/v1/iam/user")
+                public class IamUserController {
+
+                    /**
+                     * 发送验证码
+                     *
+                     * @param request 发送验证码信息
+                     * @return 发送结果
+                     */
+                    @PostMapping("/sendVerifyCode")
+                    public Response<Boolean> sendVerifyCode(@RequestBody @Validated SendVerifyCodeRequest request) {
+                        return null;
+                    }
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/SendVerifyCodeRequest.java",
+                """
+                package com.example.controller;
+
+                public class SendVerifyCodeRequest {
+                    private String phone;
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.IamUserController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec = load_spec_text(
+                store.files["services/demo-service/controllers/IamUserController/IamUserController.spec.yaml"]
+            )
+            method = spec.methods[0]
+
+            self.assertEqual("发送验证码", method.semantic.summary)
+            self.assertEqual("发送验证码", method.semantic.description)
+            self.assertEqual("发送验证码结果", method.response.description)
+
+    def test_provider_sync_removes_query_action_words_from_response_description(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/IamUserController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.PageDTO;
+                import com.dst.steed.common.domain.response.Response;
+                import org.springframework.validation.annotation.Validated;
+                import org.springframework.web.bind.annotation.PostMapping;
+                import org.springframework.web.bind.annotation.RequestBody;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RestController;
+
+                @RestController
+                @RequestMapping("/v1/iam/user")
+                public class IamUserController {
+
+                    /**
+                     * 查询IAM用户详情
+                     */
+                    @PostMapping("/detail")
+                    public Response<IamUserDetailVO> detail(@RequestBody @Validated DetailQuery request) {
+                        return null;
+                    }
+
+                    /**
+                     * 分页查询IAM用户
+                     */
+                    @PostMapping("/page")
+                    public Response<PageDTO<IamUserPageVO>> page(@RequestBody @Validated PageQuery request) {
+                        return null;
+                    }
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/DetailQuery.java",
+                """
+                package com.example.controller;
+
+                public class DetailQuery {
+                    private Long userId;
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/PageQuery.java",
+                """
+                package com.example.controller;
+
+                public class PageQuery {
+                    private Integer pageNo;
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/IamUserDetailVO.java",
+                """
+                package com.example.controller;
+
+                public class IamUserDetailVO {
+                    private String name;
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/IamUserPageVO.java",
+                """
+                package com.example.controller;
+
+                public class IamUserPageVO {
+                    private String name;
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.IamUserController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec = load_spec_text(
+                store.files["services/demo-service/controllers/IamUserController/IamUserController.spec.yaml"]
+            )
+
+            self.assertEqual("查询IAM用户详情", spec.methods[0].semantic.summary)
+            self.assertEqual("IAM用户详情", spec.methods[0].response.description)
+            self.assertEqual("分页查询IAM用户", spec.methods[1].semantic.summary)
+            self.assertEqual("IAM用户分页结果", spec.methods[1].response.description)
+
+    def test_provider_sync_extracts_controller_response_errors_and_service_hop_business_exceptions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_repo = root / "provider"
+            store = MemoryContractStore()
+            self._init_provider_repo(provider_repo)
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/IamUserController.java",
+                """
+                package com.example.controller;
+
+                import com.dst.steed.common.domain.response.Response;
+                import com.dst.steed.common.exception.BusinessException;
+                import lombok.RequiredArgsConstructor;
+                import org.springframework.validation.annotation.Validated;
+                import org.springframework.web.bind.annotation.PostMapping;
+                import org.springframework.web.bind.annotation.RequestBody;
+                import org.springframework.web.bind.annotation.RequestMapping;
+                import org.springframework.web.bind.annotation.RestController;
+
+                @RestController
+                @RequiredArgsConstructor
+                @RequestMapping("/iam-user")
+                public class IamUserController {
+
+                    private final IamUserService iamUserService;
+
+                    /**
+                     * 创建IAM用户
+                     */
+                    @PostMapping("/create")
+                    public Response<Boolean> create(@RequestBody @Validated CreateUserRequest request) {
+                        try {
+                            iamUserService.createUser(request);
+                            return Response.succeed(Boolean.TRUE);
+                        } catch (BusinessException e) {
+                            return Response.error(e.getRespType());
+                        } catch (Exception e) {
+                            return Response.error(DemoRespEnum.SYSTEM_ERROR);
+                        }
+                    }
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/CreateUserRequest.java",
+                """
+                package com.example.controller;
+
+                public class CreateUserRequest {
+                    private String phone;
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/IamUserService.java",
+                """
+                package com.example.controller;
+
+                public interface IamUserService {
+                    Boolean createUser(CreateUserRequest request);
+                }
+                """,
+            )
+            self._write_java(
+                provider_repo / "src/main/java/com/example/controller/impl/IamUserServiceImpl.java",
+                """
+                package com.example.controller.impl;
+
+                import com.dst.steed.common.exception.BusinessException;
+                import com.example.controller.CreateUserRequest;
+                import com.example.controller.DemoRespEnum;
+                import com.example.controller.IamUserService;
+
+                public class IamUserServiceImpl implements IamUserService {
+                    @Override
+                    public Boolean createUser(CreateUserRequest request) {
+                        throw new BusinessException(DemoRespEnum.USER_ALREADY_EXISTS);
+                    }
+                }
+                """,
+            )
+
+            sync_provider_to_store(
+                ProviderSyncOptions(
+                    provider_repo=provider_repo,
+                    controller_fqcn="com.example.controller.IamUserController",
+                    contracts_root=root / "unused",
+                    service_owner="tester",
+                    domain="demo",
+                ),
+                store,
+            )
+
+            spec = load_spec_text(
+                store.files["services/demo-service/controllers/IamUserController/IamUserController.spec.yaml"]
+            )
+            method = spec.methods[0]
+            error_codes = [item.code for item in method.errors]
+            doc_text = store.files["services/demo-service/controllers/IamUserController/IamUserController.doc.md"]
+
+            self.assertIn("DemoRespEnum.USER_ALREADY_EXISTS", error_codes)
+            self.assertIn("DemoRespEnum.SYSTEM_ERROR", error_codes)
+            self.assertNotIn("| 无 | 无 | 无 |", doc_text)
+
     def test_provider_sync_filters_low_value_capability_terms(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

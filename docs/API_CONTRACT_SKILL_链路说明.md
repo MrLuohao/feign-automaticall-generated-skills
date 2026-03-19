@@ -1,6 +1,6 @@
 # API Contract Skill 链路说明
 
-更新时间：2026-03-17
+更新时间：2026-03-19
 
 ## 1. 当前系统里有哪几个角色
 
@@ -98,7 +98,7 @@ repo-root/
 
 ### 当前远端状态
 
-为便于重新做联调测试，远端 `main` 已在 2026-03-17 被人工清空。
+为便于重新做联调测试，远端 `main` 当前仍是空树状态。
 
 ## 4. 当前支持哪几类请求
 
@@ -148,7 +148,9 @@ python3 scripts/api_contract_cli.py provider sync \
 
 当前真实验证状态：
 - API store 代码已落地
-- 本地 `30` 条测试已覆盖并通过
+- 本地 `45` 条测试已覆盖并通过
+- 默认 Git SSH 模式已完成多轮真实回放
+- `dst-app-service` 与 `dst-app-bff-service` 已在远端 `test` 分支完成一轮全量 controller sync
 - 但当前机器到 `https://gitlab.dstcar.com/api/v4/...` 的 HTTPS/TLS 握手失败
 - 所以 `gitlab_api` 模式尚未完成真实远端回放验证
 
@@ -213,8 +215,10 @@ global.index.json -> service shard -> spec
 
 ### 已完成并做过真实回放
 
-- 默认 `github` / Git SSH 模式真实回放成功过一轮最小样本
+- 默认 `github` / Git SSH 模式真实回放成功过多轮样本
 - `provider sync` 和 `contracts rebuild-index` 都成功写到远端
+- `dst-app-service` 全量 `14` 个 controller 已真实同步，生成 `68` 个 operation
+- `dst-app-bff-service` 全量 `26` 个 controller 已真实同步，生成 `85` 个 operation
 
 ### 尚未完成的真实验证
 
@@ -230,17 +234,164 @@ global.index.json -> service shard -> spec
 - 不是 token 权限问题
 - 不是 skill 代码逻辑本身的问题
 
-## 11. 你现在最需要记住的几条
+## 11. 读取路径对比
+
+本文只展开 contracts 的读取方式差异，不重复 provider 写入链路细节。
+
+### 三种读取方案
+
+```mermaid
+flowchart TB
+    subgraph A[方案 A：当前实现 - 本地临时浅副本]
+        A1[本地 skill / client]
+        A2[本地 tmp repo<br/>临时 git 仓库]
+        A3[远端 contracts 仓库<br/>GitLab]
+        A1 -->|consumer search / generate| A2
+        A2 -->|fetch --depth 1<br/>checkout| A3
+        A2 -->|读取 global.index / shard / spec / service| A1
+    end
+
+    subgraph B[方案 B：本机私有 mirror]
+        B1[本地 skill / client]
+        B2[本机 bare mirror / cache<br/>长期存在]
+        B3[远端 contracts 仓库<br/>GitLab]
+        B1 -->|search / generate| B2
+        B2 -->|每次操作前 fetch origin branch| B3
+        B2 -->|固定到同一 revision 读取| B1
+    end
+
+    subgraph C[方案 C：云端中心化 mirror]
+        C1[本地 skill / client]
+        C2[云端执行节点]
+        C3[云端中心化 bare mirror]
+        C4[远端 contracts 仓库<br/>GitLab]
+        C1 -->|search / generate 请求| C2
+        C2 -->|读取 contracts| C3
+        C3 -->|定时或按需 fetch| C4
+        C2 -->|返回 operationId / spec / 生成结果| C1
+    end
+
+    W[provider sync / rebuild-index<br/>写远端真源]
+    W --> A3
+    W --> B3
+    W --> C4
+```
+
+### 当前方案的真实行为
+
+当前实现不是“直接 SSH 实时读远端文件”，而是：
+
+1. 本地创建一个临时 git 仓库
+2. 从远端做一次浅 fetch
+3. checkout 到本地
+4. 再读取本地文件
+
+所以当前真正的问题，不是“有没有副本”，而是“每次都在重复创建短命副本”。
+
+### mirror 方案为什么仍然有意义
+
+- 多个文件读取可以固定到同一个 revision
+- 多次查询不需要每次都重复建临时 repo
+- 远端压力从“每次查询都要参与”变成“按需或按周期同步一次”
+
+mirror 的价值不在“内容不同”，而在“读取成本结构不同”。
+
+### 什么时候值得上 mirror
+
+- 高频多人：更适合上 mirror，因为查询频率高，更需要稳定一致的 revision 视图
+- 中频少人：更合理的第一步通常是停止“每次临时 shallow clone”，改成轻量持久缓存
+
+### 当前建议
+
+- 当前实现属于方案 A，本地临时浅副本
+- 如果只是中频少人：优先考虑轻量持久缓存，不要一开始就做重型平台化
+- 如果未来变成高频多人：再演进到方案 C，云端中心化 mirror
+
+### 分层结构图
+
+#### 方案 A：当前实现，本地临时浅副本
+
+```text
+┌──────────────────────────────────────────────────────────────────────────┐
+│                              本地执行层                                  │
+│    ┌──────────────────────┐      ┌──────────────────────────────────┐   │
+│    │   skill / client     │─────▶│  本地 tmp repo                   │   │
+│    │  search / generate   │      │  临时 git 仓库                   │   │
+│    └──────────────────────┘      └──────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      │ fetch --depth 1 + checkout
+                                      ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                           远端真源仓库层                                 │
+│      git@gitlab.dstcar.com:dmp/ai-coding/dst-api-skills-repo.git       │
+│      - services/<service>/SERVICE.yaml                                  │
+│      - controllers/*/*.spec.yaml                                        │
+│      - controllers/*/*.doc.md                                           │
+│      - indexes/global.index.json                                        │
+│      - indexes/services/<service>/*                                     │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 方案 B：本机私有 mirror
+
+```text
+┌──────────────────────────────────────────────────────────────────────────┐
+│                              本地执行层                                  │
+│    ┌──────────────────────┐      ┌──────────────────────────────────┐   │
+│    │   skill / client     │─────▶│  本机 bare mirror / cache        │   │
+│    │  search / generate   │      │  长期存在，只读查询               │   │
+│    └──────────────────────┘      └──────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      │ 每次操作前 fetch origin branch
+                                      ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                           远端真源仓库层                                 │
+│      git@gitlab.dstcar.com:dmp/ai-coding/dst-api-skills-repo.git       │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 方案 C：云端中心化 mirror
+
+```text
+┌──────────────────────────────────────────────────────────────────────────┐
+│                              客户端层                                    │
+│                     ┌──────────────────────────────┐                     │
+│                     │      本地 skill / client     │                     │
+│                     │   只发 search / generate 请求 │                     │
+│                     └──────────────┬───────────────┘                     │
+└────────────────────────────────────┼─────────────────────────────────────┘
+                                     │
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                            云端执行层                                    │
+│      ┌──────────────────────────┐      ┌────────────────────────────┐    │
+│      │  云端 search/generate    │─────▶│  云端中心化 bare mirror    │    │
+│      │      worker / service    │      │  长期存在，集中复用         │    │
+│      └──────────────────────────┘      └────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     │ 定时或按需 fetch
+                                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                           远端真源仓库层                                 │
+│      git@gitlab.dstcar.com:dmp/ai-coding/dst-api-skills-repo.git       │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+## 12. 你现在最需要记住的几条
 
 - 当前全局入口仍是 `indexes/global.index.json`
 - 默认远端写入仍可走 Git SSH
 - GitLab API store 已实现，但真实 HTTPS 回放被 TLS 阻塞
-- 远端 `main` 当前已清空，适合重新做联调测试
+- `dst-app-service` 与 `dst-app-bff-service` 已在 `test` 分支完成真实 sync
+- 当前读取路径仍是“本地临时浅副本”，尚未演进到长期 mirror
 
 一句话总结：
 
 ```text
 provider 把源码变成远端 contracts 真源；
 consumer 先从远端 contracts 找接口，再在本地项目里生成代码；
-当前真实外部阻塞点是 GitLab HTTPS API 的 TLS 握手，而不是 contracts 模型本身。
+当前真实外部阻塞点是 GitLab HTTPS API 的 TLS 握手，而不是 contracts 模型本身；读取侧的主要结构性问题则是每次查询都在重建短命副本。
 ```
