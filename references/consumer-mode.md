@@ -4,12 +4,12 @@
 
 consumer 行为链固定为：
 
-`global.index -> service shard -> spec -> 本地结构识别 -> 生成`
+`local router index -> local service shard -> operationId -> spec -> 本地结构识别 -> 生成`
 
 ## 检索规则
 
-- 先读 `global.index.json`
-- 再进入少量 service shard 做主检索
+- 先读本地 `router.sqlite`
+- 再进入少量本地 service shard 做主检索
 - 候选收敛后再回源 `Spec`
 - 最终必须落到唯一 `operationId`
 - 未形成唯一高置信候选时，不允许直接生成
@@ -24,6 +24,18 @@ consumer 行为链固定为：
 - 提示补线索、补契约或联系 owner
 - 不自动扩散搜索
 - 不生成近似代码
+
+## 本地缓存
+
+- 检索默认依赖本地缓存索引
+- 本地缓存由 `contracts cache sync` 同步
+- 查询时允许先做轻量版本检查，再决定是否同步
+- 本地缓存缺失时，应先初始化缓存，再执行检索
+- 当前默认索引发布前缀为 `indexes/releases/`
+- 当前调试期默认索引发布分支为 `test`
+- 当前默认本地缓存目录为当前 skill 项目的 `.cache/api-contract/`
+- 若远端 manifest 检查失败但本地已有缓存，则继续使用本地旧缓存
+- 若远端 manifest 版本已变化，则查询前先刷新本地缓存
 
 ## 生成规则优先级
 

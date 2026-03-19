@@ -12,14 +12,6 @@ from pathlib import Path
 
 from .contract_store import ContractStore
 from .doc_renderer import render_doc
-from .indexer import (
-    build_global_index,
-    build_service_shard,
-    dump_global_index,
-    dump_inverted_bucket,
-    dump_manifest,
-    dump_operation_docs,
-)
 from .models import (
     ControllerMeta,
     ControllerSource,
@@ -189,12 +181,9 @@ def delete_controller_contract_from_store(options: ProviderDeleteControllerOptio
     doc_path = store.get_controller_doc_file(service_name, controller_name)
     if store.read_text(spec_path) is None and store.read_text(doc_path) is None:
         raise ProviderSyncError(f"Controller contract files not found for {controller_name} under service {service_name}.")
-    all_specs = _group_specs(store.iter_all_specs())
-    remaining_specs = [spec for name, spec in all_specs.get(service_name, []) if name != controller_name]
-    upserts, extra_deletes = _build_service_index_payload(store, service_model, remaining_specs)
-    deletes = [spec_path, doc_path, *extra_deletes]
+    deletes = [spec_path, doc_path, *_legacy_index_files(store)]
     store.write_batch(
-        upserts,
+        {},
         deletes,
         commit_message=f"Delete {service_name}/{controller_name} API contracts",
     )
@@ -202,20 +191,9 @@ def delete_controller_contract_from_store(options: ProviderDeleteControllerOptio
 
 
 def rebuild_index(store: ContractStore) -> str:
-    services = store.iter_all_services()
-    specs_by_service = _group_specs(store.iter_all_specs())
-    upserts: dict[str, str] = {}
-    deletes: list[str] = []
-    shards = {}
-    for service_model in services:
-        specs = [spec for _, spec in specs_by_service.get(service_model.service, [])]
-        shard_upserts, shard_deletes, artifacts = _render_service_shard_files(store, service_model, specs)
-        upserts.update(shard_upserts)
-        deletes.extend(shard_deletes)
-        shards[service_model.service] = artifacts
-    upserts[store.get_global_index_file()] = dump_global_index(build_global_index(services, shards))
-    store.write_batch(upserts, deletes, commit_message="Rebuild API contracts index")
-    return store.get_global_index_file()
+    deletes = _legacy_index_files(store)
+    store.write_batch({}, deletes, commit_message="Remove legacy API contracts index")
+    return "indexes/"
 
 
 def _build_sync_payload(
@@ -231,22 +209,8 @@ def _build_sync_payload(
         store.get_controller_spec_file(service_name, controller_name): render_spec_text(spec_model),
         store.get_controller_doc_file(service_name, controller_name): doc_text,
     }
-    specs_by_service = _group_specs(store.iter_all_specs())
-    service_specs = {name: spec for name, spec in specs_by_service.get(service_name, [])}
-    service_specs[controller_name] = spec_model
-    shard_upserts, shard_deletes, shard = _render_service_shard_files(
-        store,
-        service_model,
-        [service_specs[name] for name in sorted(service_specs)],
-    )
-    upserts.update(shard_upserts)
-    services = {item.service: item for item in store.iter_all_services()}
-    services[service_name] = service_model
-    all_shards = _load_existing_shards(store, set(services), {service_name: shard})
-    upserts[store.get_global_index_file()] = dump_global_index(
-        build_global_index([services[name] for name in sorted(services)], all_shards)
-    )
-    return upserts, shard_deletes
+    deletes = _legacy_index_files(store)
+    return upserts, deletes
 
 
 def _build_service_index_payload(
@@ -254,55 +218,8 @@ def _build_service_index_payload(
     service_model: ServiceModel,
     specs: list[ControllerSpecModel],
 ) -> tuple[dict[str, str], list[str]]:
-    upserts, deletes, shard = _render_service_shard_files(store, service_model, specs)
-    services = {item.service: item for item in store.iter_all_services()}
-    services[service_model.service] = service_model
-    all_shards = _load_existing_shards(store, set(services), {service_model.service: shard})
-    upserts[store.get_global_index_file()] = dump_global_index(
-        build_global_index([services[name] for name in sorted(services)], all_shards)
-    )
-    return upserts, deletes
-
-
-def _render_service_shard_files(
-    store: ContractStore,
-    service_model: ServiceModel,
-    specs: list[ControllerSpecModel],
-) -> tuple[dict[str, str], list[str], object]:
-    artifacts = build_service_shard(service_model, specs)
-    upserts = {
-        store.get_service_manifest_file(service_model.service): dump_manifest(artifacts.manifest),
-        store.get_service_operations_file(service_model.service): dump_operation_docs(artifacts.operation_docs),
-    }
-    deletes: list[str] = []
-    existing_bucket_files = store.list_files(store.get_service_inverted_dir(service_model.service))
-    new_bucket_files = {
-        store.get_service_inverted_bucket_file(service_model.service, bucket)
-        for bucket in artifacts.inverted_buckets
-    }
-    for bucket_file in existing_bucket_files:
-        if bucket_file not in new_bucket_files:
-            deletes.append(bucket_file)
-    for bucket, content in artifacts.inverted_buckets.items():
-        upserts[store.get_service_inverted_bucket_file(service_model.service, bucket)] = dump_inverted_bucket(content)
-    return upserts, deletes, artifacts
-
-
-def _load_existing_shards(store: ContractStore, services: set[str], overrides: dict[str, object]) -> dict[str, object]:
-    results = dict(overrides)
-    for service in services:
-        if service in results:
-            continue
-        manifest = store.load_service_manifest(service)
-        docs = store.load_operation_docs(service)
-        if manifest is None:
-            continue
-        results[service] = type(
-            "ShardStub",
-            (),
-            {"manifest": manifest, "operation_docs": docs, "inverted_buckets": {}},
-        )()
-    return results
+    del service_model, specs
+    return {}, _legacy_index_files(store)
 
 
 def _group_specs(items: list[tuple[str, str, ControllerSpecModel]]) -> dict[str, list[tuple[str, ControllerSpecModel]]]:
@@ -310,6 +227,10 @@ def _group_specs(items: list[tuple[str, str, ControllerSpecModel]]) -> dict[str,
     for service, controller, spec in items:
         results[service].append((controller, spec))
     return results
+
+
+def _legacy_index_files(store: ContractStore) -> list[str]:
+    return store.list_files("indexes/")
 
 
 def render_service_text(service_model: ServiceModel) -> str:

@@ -14,7 +14,7 @@
 - `services/<service>/SERVICE.yaml`
 - `services/<service>/controllers/<Controller>/<Controller>.spec.yaml`
 - `services/<service>/controllers/<Controller>/<Controller>.doc.md`
-- 对应的 global/shard 索引更新
+- 真源变更后可由独立索引构建流程生成并发布检索索引
 
 ## 同步规则
 
@@ -47,6 +47,9 @@
 
 ## 附属能力
 
-- 支持 service 级 rebuild
+- 支持基于真源重新构建并发布检索索引
+- 索引构建是独立流程，不与 provider sync 的真源写入耦合
+- 当前调试期默认索引发布分支为 `test`，默认路径前缀为 `indexes/releases/`
+- 调试期建议先以本地 `output-dir` 产物验证，再切换到远端分支发布
 - rebuild 只作为修复与校验能力
 - rebuild 不是日常主流程

@@ -39,31 +39,38 @@ repo-root/
         <Controller>/
           <Controller>.spec.yaml
           <Controller>.doc.md
-  indexes/
-    global.index.json
-    services/
-      <service>/
-        ...
 ```
 
 - 仓库根就是 contracts 逻辑根
 - 不引入 base path 模型层概念
 - `Doc` 与 `Spec` 同层，但仍是派生对象
+- 发布级检索索引不再与真源同仓存储，而是独立构建并分发到本地缓存
+- 当前默认发布策略是写回同一 GitLab contracts 仓库的独立索引路径，调试期默认分支为 `test`
 
 ## 索引总原则
 
-- 检索链路固定为：`query -> global index -> service shard -> spec`
-- `global.index.json` 只做 service 路由，不放 operation 明细
+- 检索链路固定为：`query -> local router index -> local service shard -> operationId -> spec`
+- 本地缓存索引是运行时检索对象，真源仓库不是查询主路径
+- 当前默认索引发布前缀为 `indexes/releases/`
+- 全局 router index 只做 service 路由，不放完整 operation 明细
 - service shard 是主要检索层
-- shard 内部采用 `manifest / operations / inverted` 三层心智模型
+- shard 统一使用本地 SQLite 作为嵌入式检索载体
 - 中文检索采用归一化、短语切分和有限同义扩展
 
 ## 全局不变量
 
 - 不允许 local fallback
+- 允许本地缓存索引；本地缓存是正式主路径，不是 fallback
 - consumer 本地规则不进入远端真源
 - 公司默认规则、service 差异规则、consumer 本地规则必须分层
 - `Doc` 不反向驱动系统
+
+## 调试期默认发布策略
+
+- 真源读取默认仍走主真源分支
+- 索引发布默认走 `test` 分支
+- 索引发布默认前缀为 `indexes/releases/`
+- 本地缓存默认目录为当前 skill 项目的 `.cache/api-contract/`
 
 更多规则见：
 - `provider-mode.md`

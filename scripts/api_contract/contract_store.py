@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -47,7 +48,16 @@ class ContractStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def write_batch(self, upserts: dict[str, str], deletes: list[str], commit_message: str | None = None) -> None:
+    def read_bytes(self, relative_path: str) -> bytes | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def write_batch(
+        self,
+        upserts: dict[str, str | bytes],
+        deletes: list[str],
+        commit_message: str | None = None,
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -192,14 +202,30 @@ class GitContractStore(ContractStore):
             return None
         return path.read_text(encoding="utf-8")
 
-    def write_batch(self, upserts: dict[str, str], deletes: list[str], commit_message: str | None = None) -> None:
+    def read_bytes(self, relative_path: str) -> bytes | None:
+        if not self._checkout_remote_branch():
+            return None
+        path = self.repo_root / relative_path
+        if not path.exists():
+            return None
+        return path.read_bytes()
+
+    def write_batch(
+        self,
+        upserts: dict[str, str | bytes],
+        deletes: list[str],
+        commit_message: str | None = None,
+    ) -> None:
         branch_exists = self._checkout_remote_branch()
         if not branch_exists:
             self._checkout_orphan_branch()
         for relative_path, content in upserts.items():
             path = self.repo_root / relative_path
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            if isinstance(content, bytes):
+                path.write_bytes(content)
+            else:
+                path.write_text(content, encoding="utf-8")
         for relative_path in deletes:
             path = self.repo_root / relative_path
             if path.exists():
@@ -316,7 +342,20 @@ class GitLabApiContractStore(ContractStore):
         )
         return None if body is None else body.decode("utf-8")
 
-    def write_batch(self, upserts: dict[str, str], deletes: list[str], commit_message: str | None = None) -> None:
+    def read_bytes(self, relative_path: str) -> bytes | None:
+        body, _ = self._request(
+            "GET",
+            self._file_raw_url(relative_path, self.branch),
+            allow_missing=True,
+        )
+        return body
+
+    def write_batch(
+        self,
+        upserts: dict[str, str | bytes],
+        deletes: list[str],
+        commit_message: str | None = None,
+    ) -> None:
         if not upserts and not deletes:
             return
         branch_exists = self._branch_exists(self.branch)
@@ -329,12 +368,18 @@ class GitLabApiContractStore(ContractStore):
         actions: list[dict[str, object]] = []
         for relative_path, content in upserts.items():
             action = "update" if self._file_exists(relative_path, ref) else "create"
+            if isinstance(content, bytes):
+                encoded_content = base64.b64encode(content).decode("ascii")
+                encoding = "base64"
+            else:
+                encoded_content = content
+                encoding = "text"
             actions.append(
                 {
                     "action": action,
                     "file_path": relative_path,
-                    "content": content,
-                    "encoding": "text",
+                    "content": encoded_content,
+                    "encoding": encoding,
                 }
             )
         for relative_path in deletes:
@@ -469,25 +514,80 @@ class GitLabApiContractStore(ContractStore):
         return detail or f"GitLab API request failed: HTTP {exc.code} for {exc.url}"
 
 
-def build_contract_store() -> ContractStore:
-    source = os.getenv("API_CONTRACT_SOURCE", "github").strip().lower()
+class LocalPathContractStore(ContractStore):
+    def __init__(self, root: Path):
+        self.root = root
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def read_text(self, relative_path: str) -> str | None:
+        path = self.root / relative_path
+        if not path.exists():
+            return None
+        return path.read_text(encoding="utf-8")
+
+    def read_bytes(self, relative_path: str) -> bytes | None:
+        path = self.root / relative_path
+        if not path.exists():
+            return None
+        return path.read_bytes()
+
+    def write_batch(
+        self,
+        upserts: dict[str, str | bytes],
+        deletes: list[str],
+        commit_message: str | None = None,
+    ) -> None:
+        del commit_message
+        for relative_path, content in upserts.items():
+            path = self.root / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(content, bytes):
+                path.write_bytes(content)
+            else:
+                path.write_text(content, encoding="utf-8")
+        for relative_path in deletes:
+            path = self.root / relative_path
+            if path.exists():
+                path.unlink()
+                _cleanup_empty_dirs(path.parent, self.root)
+
+    def list_files(self, prefix: str) -> list[str]:
+        normalized = prefix.rstrip("/")
+        root = self.root / normalized
+        if root.is_file():
+            return [normalized]
+        if not root.exists():
+            return []
+        return sorted(path.relative_to(self.root).as_posix() for path in root.rglob("*") if path.is_file())
+
+
+def build_contract_store(prefix: str = "API_CONTRACT_") -> ContractStore:
+    source = os.getenv(f"{prefix}SOURCE", "github").strip().lower()
+    default_branch = "test" if prefix == "API_CONTRACT_INDEX_PUBLISH_" else "main"
     if source in {"github", "git"}:
-        branch = os.getenv("API_CONTRACT_GITHUB_BRANCH", "main").strip() or "main"
+        branch = os.getenv(f"{prefix}GITHUB_BRANCH", default_branch).strip() or default_branch
         return GitContractStore(DEFAULT_CONTRACTS_REMOTE_URL, branch)
     if source in {"gitlab_api", "api"}:
-        token = os.getenv("API_CONTRACT_GITLAB_TOKEN", "").strip()
+        token = os.getenv(f"{prefix}GITLAB_TOKEN", "").strip()
         if not token:
-            raise ContractStoreError("Missing `API_CONTRACT_GITLAB_TOKEN` for `gitlab_api` contract source.")
-        base_url = os.getenv("API_CONTRACT_GITLAB_BASE_URL", DEFAULT_CONTRACTS_GITLAB_BASE_URL).strip()
-        project = os.getenv("API_CONTRACT_GITLAB_PROJECT", DEFAULT_CONTRACTS_GITLAB_PROJECT).strip()
+            raise ContractStoreError(f"Missing `{prefix}GITLAB_TOKEN` for `gitlab_api` contract source.")
+        base_url = os.getenv(f"{prefix}GITLAB_BASE_URL", DEFAULT_CONTRACTS_GITLAB_BASE_URL).strip()
+        project = os.getenv(f"{prefix}GITLAB_PROJECT", DEFAULT_CONTRACTS_GITLAB_PROJECT).strip()
         branch = os.getenv(
-            "API_CONTRACT_GITLAB_BRANCH",
-            os.getenv("API_CONTRACT_GITHUB_BRANCH", "main"),
-        ).strip() or "main"
-        start_branch = os.getenv("API_CONTRACT_GITLAB_START_BRANCH", "").strip() or None
+            f"{prefix}GITLAB_BRANCH",
+            os.getenv(f"{prefix}GITHUB_BRANCH", default_branch),
+        ).strip() or default_branch
+        start_branch = os.getenv(f"{prefix}GITLAB_START_BRANCH", "").strip() or None
         return GitLabApiContractStore(base_url, project, branch, token, start_branch=start_branch)
+    if source in {"local_path", "local"}:
+        root = os.getenv(f"{prefix}LOCAL_PATH", "").strip() or os.getenv(f"{prefix}LOCAL_SOURCE_PATH", "").strip()
+        if not root:
+            raise ContractStoreError(
+                f"Missing `{prefix}LOCAL_PATH` or `{prefix}LOCAL_SOURCE_PATH` for `local_path` contract source."
+            )
+        return LocalPathContractStore(Path(root))
     raise ContractStoreError(
-        f"Unsupported contract source: {source}. Supported values: github, git, gitlab_api, api."
+        f"Unsupported contract source: {source}. Supported values: github, git, gitlab_api, api, local_path, local."
     )
 
 
