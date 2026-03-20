@@ -192,10 +192,12 @@ class GitContractStore(ContractStore):
         self.branch = branch
         self._tempdir = tempfile.TemporaryDirectory(prefix="api-contract-store-")
         self.repo_root = Path(self._tempdir.name)
+        self._worktree_ready = False
+        self._active_branch_exists: bool | None = None
         self._init_repo()
 
     def read_text(self, relative_path: str) -> str | None:
-        if not self._checkout_remote_branch():
+        if not self._ensure_worktree_loaded():
             return None
         path = self.repo_root / relative_path
         if not path.exists():
@@ -203,7 +205,7 @@ class GitContractStore(ContractStore):
         return path.read_text(encoding="utf-8")
 
     def read_bytes(self, relative_path: str) -> bytes | None:
-        if not self._checkout_remote_branch():
+        if not self._ensure_worktree_loaded():
             return None
         path = self.repo_root / relative_path
         if not path.exists():
@@ -216,9 +218,11 @@ class GitContractStore(ContractStore):
         deletes: list[str],
         commit_message: str | None = None,
     ) -> None:
-        branch_exists = self._checkout_remote_branch()
+        branch_exists = self._ensure_worktree_loaded()
         if not branch_exists:
             self._checkout_orphan_branch()
+            self._worktree_ready = True
+            self._active_branch_exists = False
         for relative_path, content in upserts.items():
             path = self.repo_root / relative_path
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -237,9 +241,11 @@ class GitContractStore(ContractStore):
         self._ensure_commit_identity()
         self._run_git("commit", "-m", commit_message or "Update API contracts")
         self._run_git("push", "origin", f"HEAD:refs/heads/{self.branch}")
+        self._worktree_ready = True
+        self._active_branch_exists = True
 
     def list_files(self, prefix: str) -> list[str]:
-        if not self._checkout_remote_branch():
+        if not self._ensure_worktree_loaded():
             return []
         root = self.repo_root / prefix
         if root.is_file():
@@ -253,10 +259,10 @@ class GitContractStore(ContractStore):
         self._run_git("remote", "add", "origin", self.remote_url)
 
     def _checkout_remote_branch(self) -> bool:
-        if not self._remote_branch_exists():
-            return False
         self._run_git("fetch", "--depth", "1", "origin", self.branch)
         self._run_git("checkout", "-B", self.branch, "FETCH_HEAD")
+        self._worktree_ready = True
+        self._active_branch_exists = True
         return True
 
     def _checkout_orphan_branch(self) -> None:
@@ -268,6 +274,19 @@ class GitContractStore(ContractStore):
                 shutil.rmtree(child)
             else:
                 child.unlink()
+        self._worktree_ready = True
+        self._active_branch_exists = False
+
+    def _ensure_worktree_loaded(self) -> bool:
+        if self._worktree_ready:
+            return bool(self._active_branch_exists)
+        branch_exists = self._remote_branch_exists()
+        if branch_exists:
+            self._checkout_remote_branch()
+        else:
+            self._worktree_ready = True
+            self._active_branch_exists = False
+        return branch_exists
 
     def _remote_branch_exists(self) -> bool:
         result = self._run_git("ls-remote", "--exit-code", "--heads", "origin", self.branch, check=False)
@@ -563,7 +582,7 @@ class LocalPathContractStore(ContractStore):
 
 def build_contract_store(prefix: str = "API_CONTRACT_") -> ContractStore:
     source = os.getenv(f"{prefix}SOURCE", "github").strip().lower()
-    default_branch = "test" if prefix == "API_CONTRACT_INDEX_PUBLISH_" else "main"
+    default_branch = "main"
     if source in {"github", "git"}:
         branch = os.getenv(f"{prefix}GITHUB_BRANCH", default_branch).strip() or default_branch
         return GitContractStore(DEFAULT_CONTRACTS_REMOTE_URL, branch)

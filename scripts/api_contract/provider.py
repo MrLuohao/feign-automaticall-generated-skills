@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import select
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 import zipfile
@@ -10,7 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from .contract_store import ContractStore
+from .contract_store import ContractStore, LocalPathContractStore
 from .doc_renderer import render_doc
 from .models import (
     ControllerMeta,
@@ -61,6 +62,7 @@ GENERIC_WRAPPER_TYPES = {
 RESPONSE_SCHEMA_WRAPPER_TYPES = {"PageDTO", "Page", "IPage", "Tree"}
 _TYPE_SOURCE_CACHE: dict[str, str | None] = {}
 _TYPE_BINARY_JAR_CACHE: dict[str, tuple[Path, str] | None] = {}
+_LOCAL_TYPE_FQCN_CACHE: dict[tuple[str, str], str | None] = {}
 COMMON_FIELD_DESCRIPTION_MAP = {
     "page": "当前页码",
     "pageSize": "每页条数",
@@ -127,6 +129,20 @@ class ProviderSyncResult:
     doc_file: str
 
 
+@dataclass
+class ProviderBatchFailure:
+    controller_fqcn: str
+    error: str
+
+
+@dataclass
+class ProviderBatchSyncResult:
+    total: int
+    synced: int
+    ignored: int
+    failures: list[ProviderBatchFailure]
+
+
 def sync_provider_to_store(options: ProviderSyncOptions, store: ContractStore) -> ProviderSyncResult:
     service_name = _read_service_name(options.provider_repo)
     controller_file = _find_java_file(options.provider_repo, options.controller_fqcn)
@@ -171,6 +187,57 @@ def sync_provider_to_store(options: ProviderSyncOptions, store: ContractStore) -
     )
 
 
+def sync_provider_batch_to_store(
+    *,
+    provider_root: Path,
+    domain: str,
+    service_owner: str | None,
+    store: ContractStore,
+) -> ProviderBatchSyncResult:
+    controllers = _discover_controller_targets(provider_root)
+    with tempfile.TemporaryDirectory(prefix="api-contract-batch-stage-") as tmp:
+        staged_store = LocalPathContractStore(Path(tmp))
+        _copy_contract_tree(store, staged_store, prefixes=("services/", "indexes/"))
+
+        synced = 0
+        ignored = 0
+        failures: list[ProviderBatchFailure] = []
+        for provider_repo, controller_fqcn in controllers:
+            try:
+                result = sync_provider_to_store(
+                    ProviderSyncOptions(
+                        provider_repo=provider_repo,
+                        controller_fqcn=controller_fqcn,
+                        contracts_root=provider_root,
+                        service_owner=service_owner,
+                        domain=domain,
+                    ),
+                    staged_store,
+                )
+            except Exception as exc:
+                failures.append(ProviderBatchFailure(controller_fqcn=controller_fqcn, error=str(exc)))
+                continue
+            if result.status == "ignored":
+                ignored += 1
+            else:
+                synced += 1
+
+        upserts, deletes = _build_store_diff(store, staged_store, prefixes=("services/", "indexes/"))
+        if upserts or deletes:
+            store.write_batch(
+                upserts,
+                deletes,
+                commit_message=f"Batch sync API contracts for {domain} ({synced + ignored}/{len(controllers)} controllers)",
+            )
+
+    return ProviderBatchSyncResult(
+        total=len(controllers),
+        synced=synced,
+        ignored=ignored,
+        failures=failures,
+    )
+
+
 def delete_controller_contract_from_store(options: ProviderDeleteControllerOptions, store: ContractStore) -> tuple[str, str]:
     service_name = _read_service_name(options.provider_repo)
     controller_name = Path(*options.controller_fqcn.split(".")).stem
@@ -194,6 +261,60 @@ def rebuild_index(store: ContractStore) -> str:
     deletes = _legacy_index_files(store)
     store.write_batch({}, deletes, commit_message="Remove legacy API contracts index")
     return "indexes/"
+
+
+def _discover_controller_targets(provider_root: Path) -> list[tuple[Path, str]]:
+    targets: list[tuple[Path, str]] = []
+    for controller_file in sorted(provider_root.rglob("*Controller.java")):
+        path_text = controller_file.as_posix()
+        marker = "/src/main/java/"
+        if marker not in path_text:
+            continue
+        repo_root_text, relative = path_text.split(marker, 1)
+        fqcn = relative.replace("/", ".")[:-5]
+        targets.append((Path(repo_root_text), fqcn))
+    return targets
+
+
+def _copy_contract_tree(source: ContractStore, target: ContractStore, *, prefixes: tuple[str, ...]) -> None:
+    upserts: dict[str, bytes] = {}
+    for prefix in prefixes:
+        for relative_path in source.list_files(prefix):
+            content = source.read_bytes(relative_path)
+            if content is not None:
+                upserts[relative_path] = content
+    if upserts:
+        target.write_batch(upserts, [])
+
+
+def _build_store_diff(
+    source: ContractStore,
+    target: ContractStore,
+    *,
+    prefixes: tuple[str, ...],
+) -> tuple[dict[str, bytes], list[str]]:
+    source_paths = {
+        relative_path
+        for prefix in prefixes
+        for relative_path in source.list_files(prefix)
+    }
+    target_paths = {
+        relative_path
+        for prefix in prefixes
+        for relative_path in target.list_files(prefix)
+    }
+    upserts: dict[str, bytes] = {}
+    deletes: list[str] = []
+    for relative_path in sorted(target_paths):
+        target_bytes = target.read_bytes(relative_path)
+        source_bytes = source.read_bytes(relative_path)
+        if target_bytes is None:
+            continue
+        if source_bytes != target_bytes:
+            upserts[relative_path] = target_bytes
+    for relative_path in sorted(source_paths - target_paths):
+        deletes.append(relative_path)
+    return upserts, deletes
 
 
 def _build_sync_payload(
@@ -497,7 +618,7 @@ def _collect_type_schemas(
         return _dedupe_types(result)
     schema, parent = _parse_type_schema(provider_repo, type_name)
     result = []
-    if parent and not _is_scalar_type(parent):
+    if parent and not _is_scalar_type(parent) and _has_local_type_source(provider_repo, parent):
         try:
             result.extend(_collect_type_schemas(provider_repo, parent, seen))
         except ProviderSyncError:
@@ -507,7 +628,12 @@ def _collect_type_schemas(
     result.append(schema)
     for field in schema.fields:
         field_type = field.type
-        if not field_type or _is_scalar_type(field_type) or _is_type_variable(field_type):
+        if (
+            not field_type
+            or _is_scalar_type(field_type)
+            or _is_type_variable(field_type)
+            or not _has_local_type_source(provider_repo, field_type)
+        ):
             continue
         try:
             result.extend(_collect_type_schemas(provider_repo, field_type, seen))
@@ -591,12 +717,18 @@ def _annotation_name(annotation: str) -> str:
 
 
 def _find_imported_fqcn(provider_repo: Path, type_name: str) -> str | None:
+    cache_key = (provider_repo.as_posix(), type_name)
+    if cache_key in _LOCAL_TYPE_FQCN_CACHE:
+        return _LOCAL_TYPE_FQCN_CACHE[cache_key]
     for file_path in provider_repo.rglob("*.java"):
         text = file_path.read_text(encoding="utf-8")
         if re.search(rf"\b(?:class|record|enum)\s+{re.escape(type_name)}\b", text):
             package = re.search(r"package\s+([a-zA-Z0-9_.]+);", text)
             if package:
-                return f"{package.group(1)}.{type_name}"
+                fqcn = f"{package.group(1)}.{type_name}"
+                _LOCAL_TYPE_FQCN_CACHE[cache_key] = fqcn
+                return fqcn
+    _LOCAL_TYPE_FQCN_CACHE[cache_key] = None
     return None
 
 
@@ -607,6 +739,16 @@ def _find_local_type_source(provider_repo: Path, type_name: str) -> tuple[Path, 
         return None
     source_path = _find_java_file(provider_repo, local_fqcn)
     return source_path, type_name
+
+
+def _has_local_type_source(provider_repo: Path, type_name: str) -> bool:
+    normalized = type_name.replace(" ", "")
+    if "<" in normalized and ">" in normalized:
+        raw_type = _raw_generic_type(normalized)
+        if raw_type not in GENERIC_WRAPPER_TYPES and _find_local_type_source(provider_repo, raw_type) is not None:
+            return True
+        return any(_has_local_type_source(provider_repo, arg) for arg in _generic_arguments(normalized))
+    return _find_local_type_source(provider_repo, normalized) is not None
 
 
 def _maven_repo_root() -> Path:

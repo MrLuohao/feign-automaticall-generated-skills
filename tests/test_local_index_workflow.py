@@ -38,7 +38,7 @@ from api_contract.models import (
     ServiceSource,
     ServiceTarget,
 )
-from api_contract.provider import ProviderSyncOptions, sync_provider_to_store
+from api_contract.provider import ProviderSyncOptions, sync_provider_batch_to_store, sync_provider_to_store
 from api_contract.search import search_operation
 
 
@@ -75,6 +75,27 @@ class MemoryContractStore(ContractStore):
 
     def list_files(self, prefix: str) -> list[str]:
         return sorted(path for path in self.files if path.startswith(prefix))
+
+
+class CountingMemoryContractStore(MemoryContractStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.write_calls: list[dict[str, object]] = []
+
+    def write_batch(
+        self,
+        upserts: dict[str, str | bytes],
+        deletes: list[str],
+        commit_message: str | None = None,
+    ) -> None:
+        self.write_calls.append(
+            {
+                "upserts": dict(upserts),
+                "deletes": list(deletes),
+                "commit_message": commit_message,
+            }
+        )
+        super().write_batch(upserts, deletes, commit_message)
 
 
 class LocalIndexWorkflowTest(unittest.TestCase):
@@ -507,7 +528,7 @@ class LocalIndexWorkflowTest(unittest.TestCase):
                 )
                 self.assertTrue((publish_root / "indexes/releases/manifest.json").exists())
 
-    def test_index_publish_store_defaults_branch_to_test(self) -> None:
+    def test_index_publish_store_defaults_branch_to_main(self) -> None:
         with mock.patch.dict(
             os.environ,
             {
@@ -517,7 +538,7 @@ class LocalIndexWorkflowTest(unittest.TestCase):
         ):
             store = build_contract_store(prefix="API_CONTRACT_INDEX_PUBLISH_")
         self.assertIsInstance(store, GitContractStore)
-        self.assertEqual("test", store.branch)
+        self.assertEqual("main", store.branch)
 
     def test_provider_sync_only_updates_true_source_files(self) -> None:
         store = MemoryContractStore()
@@ -570,6 +591,84 @@ class LocalIndexWorkflowTest(unittest.TestCase):
                 store.files,
             )
             self.assertNotIn("indexes/global.index.json", store.files)
+
+    def test_provider_sync_batch_stages_multiple_controllers_and_commits_once(self) -> None:
+        store = CountingMemoryContractStore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_root = root / "providers"
+            repo_a = provider_root / "repo-a"
+            repo_b = provider_root / "repo-b"
+            _init_provider_repo(repo_a, service_name="demo-service-a")
+            _init_provider_repo(repo_b, service_name="demo-service-b")
+            _write_demo_controller(repo_a, "com.example.alpha", "AlphaController", "/alpha", "/detail")
+            _write_demo_controller(repo_b, "com.example.beta", "BetaController", "/beta", "/detail")
+
+            result = sync_provider_batch_to_store(
+                provider_root=provider_root,
+                domain="demo",
+                service_owner="owner",
+                store=store,
+            )
+
+            self.assertEqual(2, result.total)
+            self.assertEqual(2, result.synced)
+            self.assertEqual(0, result.ignored)
+            self.assertEqual([], result.failures)
+            self.assertEqual(1, len(store.write_calls))
+            self.assertIn("services/demo-service-a/SERVICE.yaml", store.files)
+            self.assertIn(
+                "services/demo-service-a/controllers/AlphaController/AlphaController.spec.yaml",
+                store.files,
+            )
+            self.assertIn("services/demo-service-b/SERVICE.yaml", store.files)
+            self.assertIn(
+                "services/demo-service-b/controllers/BetaController/BetaController.spec.yaml",
+                store.files,
+            )
+
+    def test_cli_provider_sync_batch_supports_local_path_contract_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            provider_root = root / "providers"
+            repo_a = provider_root / "repo-a"
+            repo_b = provider_root / "repo-b"
+            source_root = root / "source"
+            _init_provider_repo(repo_a, service_name="demo-service-a")
+            _init_provider_repo(repo_b, service_name="demo-service-b")
+            _write_demo_controller(repo_a, "com.example.alpha", "AlphaController", "/alpha", "/detail")
+            _write_demo_controller(repo_b, "com.example.beta", "BetaController", "/beta", "/detail")
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "API_CONTRACT_SOURCE": "local_path",
+                    "API_CONTRACT_LOCAL_SOURCE_PATH": str(source_root),
+                },
+                clear=False,
+            ):
+                self.assertEqual(
+                    0,
+                    cli_main(
+                        [
+                            "provider",
+                            "sync-batch",
+                            "--provider-root",
+                            str(provider_root),
+                            "--domain",
+                            "demo",
+                            "--service-owner",
+                            "owner",
+                        ]
+                    ),
+                )
+            self.assertTrue((source_root / "services/demo-service-a/SERVICE.yaml").exists())
+            self.assertTrue(
+                (
+                    source_root
+                    / "services/demo-service-b/controllers/BetaController/BetaController.spec.yaml"
+                ).exists()
+            )
 
     def test_cli_supports_index_build_and_cache_sync_commands(self) -> None:
         store = MemoryContractStore()
@@ -785,10 +884,42 @@ def _materialize_store(store: MemoryContractStore, root: Path) -> None:
         path.write_text(content, encoding="utf-8")
 
 
-def _init_provider_repo(provider_repo: Path) -> None:
+def _init_provider_repo(provider_repo: Path, *, service_name: str = "demo-service") -> None:
     (provider_repo / "src/main/resources").mkdir(parents=True, exist_ok=True)
     (provider_repo / "src/main/resources/bootstrap.properties").write_text(
-        "spring.application.name=demo-service",
+        f"spring.application.name={service_name}",
+        encoding="utf-8",
+    )
+
+
+def _write_demo_controller(
+    provider_repo: Path,
+    package_name: str,
+    class_name: str,
+    base_path: str,
+    method_path: str,
+) -> None:
+    package_path = Path(*package_name.split("."))
+    controller_path = provider_repo / "src/main/java" / package_path / f"{class_name}.java"
+    controller_path.parent.mkdir(parents=True, exist_ok=True)
+    controller_path.write_text(
+        f"""
+        package {package_name};
+
+        import com.dst.steed.common.domain.response.Response;
+        import org.springframework.web.bind.annotation.GetMapping;
+        import org.springframework.web.bind.annotation.RequestMapping;
+        import org.springframework.web.bind.annotation.RestController;
+
+        @RestController
+        @RequestMapping("{base_path}")
+        public class {class_name} {{
+            @GetMapping("{method_path}")
+            public Response<String> detail() {{
+                return null;
+            }}
+        }}
+        """,
         encoding="utf-8",
     )
 

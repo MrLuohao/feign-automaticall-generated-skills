@@ -13,11 +13,13 @@ from .doc_renderer import write_doc
 from .generator import generate_client
 from .index_build import build_index_release
 from .provider import (
+    ProviderBatchSyncResult,
     ProviderDeleteControllerOptions,
     ProviderSyncError,
     ProviderSyncOptions,
     delete_controller_contract_from_store,
     rebuild_index,
+    sync_provider_batch_to_store,
     sync_provider_to_store,
 )
 from .search import search_operation
@@ -47,6 +49,16 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("同步成功")
             return 0
+        if args.command == "provider" and args.provider_command == "sync-batch":
+            print("正在批量同步接口契约...")
+            result = sync_provider_batch_to_store(
+                provider_root=Path(args.provider_root),
+                domain=args.domain,
+                service_owner=args.service_owner,
+                store=store,
+            )
+            _print_batch_sync_result(result)
+            return 0 if not result.failures else 1
         if args.command == "provider" and args.provider_command == "delete-controller":
             print("正在删除 Controller 契约...")
             delete_controller_contract_from_store(
@@ -143,6 +155,10 @@ def build_parser() -> argparse.ArgumentParser:
     provider_sync.add_argument("--controller", required=True)
     provider_sync.add_argument("--service-owner")
     provider_sync.add_argument("--domain", required=True)
+    provider_sync_batch = provider_sub.add_parser("sync-batch")
+    provider_sync_batch.add_argument("--provider-root", required=True)
+    provider_sync_batch.add_argument("--service-owner")
+    provider_sync_batch.add_argument("--domain", required=True)
     provider_delete = provider_sub.add_parser("delete-controller")
     provider_delete.add_argument("--provider-repo", required=True)
     provider_delete.add_argument("--controller", required=True)
@@ -248,6 +264,13 @@ def _build_cache_manager(cache_dir: str | None, index_base_url: str | None):
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def _print_batch_sync_result(result: ProviderBatchSyncResult) -> None:
+    print("批量同步完成")
+    print(f"total={result.total}\tsynced={result.synced}\tignored={result.ignored}\tfailed={len(result.failures)}")
+    for failure in result.failures:
+        print(f"FAIL\t{failure.controller_fqcn}\t{failure.error}", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@ repo-root/
 - 不引入 base path 模型层概念
 - `Doc` 与 `Spec` 同层，但仍是派生对象
 - 发布级检索索引不再与真源同仓存储，而是独立构建并分发到本地缓存
-- 当前默认发布策略是写回同一 GitLab contracts 仓库的独立索引路径，调试期默认分支为 `test`
+- 当前默认发布策略是写回同一 GitLab contracts 仓库的独立索引路径，默认分支为 `main`
 
 ## 索引总原则
 
@@ -68,7 +68,7 @@ repo-root/
 ## 调试期默认发布策略
 
 - 真源读取默认仍走主真源分支
-- 索引发布默认走 `test` 分支
+- 索引发布默认走 `main` 分支
 - 索引发布默认前缀为 `indexes/releases/`
 - 本地缓存默认目录为当前 skill 项目的 `.cache/api-contract/`
 
