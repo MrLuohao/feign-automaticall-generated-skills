@@ -40,8 +40,8 @@ python3 scripts/api_contract_cli.py ...
 
 当前默认工作流：
 
-- 真源继续从 contracts 真源仓库读取
-- 索引构建产物默认发布到与真源相同的 `main` 分支
+- 真源继续从 contracts 真源仓库读取并写回 `test` 分支
+- 索引构建产物默认发布到与真源相同的 `test` 分支
 - 默认发布前缀为 `indexes/releases/`
 - 本地检索默认使用缓存索引，查询前会做轻量版本检查
 
@@ -51,10 +51,10 @@ python3 scripts/api_contract_cli.py ...
 
 ```bash
 export API_CONTRACT_SOURCE=github
-export API_CONTRACT_GITHUB_BRANCH=main
+export API_CONTRACT_GITHUB_BRANCH=test
 
 export API_CONTRACT_INDEX_PUBLISH_SOURCE=github
-export API_CONTRACT_INDEX_PUBLISH_GITHUB_BRANCH=main
+export API_CONTRACT_INDEX_PUBLISH_GITHUB_BRANCH=test
 export API_CONTRACT_INDEX_PUBLISH_PREFIX=indexes/releases
 
 export API_CONTRACT_CACHE_DIR="/Users/luohao/.codex/skills/api-contract-client-workflow/.cache/api-contract"
@@ -70,7 +70,7 @@ python3 scripts/api_contract_cli.py provider sync \
   --domain your-domain \
   --service-owner your-name
 
-# 2. 构建并发布索引产物到 main 分支
+# 2. 构建并发布索引产物到 test 分支
 python3 scripts/api_contract_cli.py contracts index build \
   --output-dir /tmp/api-contract-index-release
 
@@ -95,7 +95,7 @@ python3 scripts/api_contract_cli.py consumer generate \
 
 - 若不传 `--index-base-url`，则需要提前把索引发布到远端可读取位置，并通过环境变量提供发布源
 - 调试期建议先用本地 `output-dir + file://` 路径验证
-- 验证通过后，直接发布到远端 `main` 分支索引路径
+- 验证通过后，直接发布到远端 `test` 分支索引路径
 - 若不显式设置 `API_CONTRACT_CACHE_DIR`，默认缓存目录为当前 skill 项目的 `.cache/api-contract/`
 
 优先阅读：

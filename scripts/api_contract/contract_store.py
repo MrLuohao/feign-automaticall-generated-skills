@@ -582,7 +582,7 @@ class LocalPathContractStore(ContractStore):
 
 def build_contract_store(prefix: str = "API_CONTRACT_") -> ContractStore:
     source = os.getenv(f"{prefix}SOURCE", "github").strip().lower()
-    default_branch = "main"
+    default_branch = "test"
     if source in {"github", "git"}:
         branch = os.getenv(f"{prefix}GITHUB_BRANCH", default_branch).strip() or default_branch
         return GitContractStore(DEFAULT_CONTRACTS_REMOTE_URL, branch)

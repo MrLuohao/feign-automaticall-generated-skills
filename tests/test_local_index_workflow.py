@@ -528,7 +528,7 @@ class LocalIndexWorkflowTest(unittest.TestCase):
                 )
                 self.assertTrue((publish_root / "indexes/releases/manifest.json").exists())
 
-    def test_index_publish_store_defaults_branch_to_main(self) -> None:
+    def test_index_publish_store_defaults_branch_to_test(self) -> None:
         with mock.patch.dict(
             os.environ,
             {
@@ -538,7 +538,7 @@ class LocalIndexWorkflowTest(unittest.TestCase):
         ):
             store = build_contract_store(prefix="API_CONTRACT_INDEX_PUBLISH_")
         self.assertIsInstance(store, GitContractStore)
-        self.assertEqual("main", store.branch)
+        self.assertEqual("test", store.branch)
 
     def test_provider_sync_only_updates_true_source_files(self) -> None:
         store = MemoryContractStore()
